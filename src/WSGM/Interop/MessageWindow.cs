@@ -5,6 +5,30 @@ using WSGM.Core;
 
 namespace WSGM.Interop;
 
+/// <summary>Which registered power setting reported a display on/off transition.
+///
+/// <para>Windows offers no way to <i>query</i> the current display power state from
+/// user mode, so a notification is the only mechanism there is. WSGM therefore listens on
+/// all three that exist and records which one spoke — a wake that one setting misses can
+/// still arrive on another, and the source name in the log is what makes a missing
+/// notification diagnosable from a pasted device log instead of guesswork.</para></summary>
+public enum DisplayStateSource
+{
+    /// <summary>GUID_SESSION_DISPLAY_STATUS — the display of this session. The primary
+    /// source, the one Microsoft documents for interactive applications, and the only one
+    /// that may be trusted to say the screen went dark.</summary>
+    Session,
+
+    /// <summary>GUID_CONSOLE_DISPLAY_STATE — the console session's display. Redundant
+    /// wake source only: it describes whichever session owns the console, so acting on
+    /// its "off" would mute the wrong session after a fast user switch.</summary>
+    Console,
+
+    /// <summary>GUID_MONITOR_POWER_ON — the superseded pre-Windows-8 setting. Modern
+    /// Windows may never send it; treated as a best-effort wake source only.</summary>
+    LegacyMonitor,
+}
+
 /// <summary>A raw message-only (HWND_MESSAGE) window whose queue is pumped by the
 /// Avalonia UI thread. Hosts RegisterHotKey registrations.</summary>
 public sealed unsafe class MessageWindow : IDisposable
@@ -44,6 +68,32 @@ public sealed unsafe class MessageWindow : IDisposable
     /// notification is delivered.</summary>
     public event Action? SessionUnlocked;
 
+    /// <summary>Raised on the Avalonia UI thread when this session's desktop is locked.</summary>
+    /// <remarks>
+    /// The counterpart to <see cref="SessionUnlocked"/>, and the point at which anything holding
+    /// hardware the user is no longer in front of should let go of it.
+    /// </remarks>
+    public event Action? SessionLocked;
+
+    /// <summary>Raised on the Avalonia UI thread when this interactive session logs off.</summary>
+    public event Action? SessionEnding;
+
+    /// <summary>Raised on the Avalonia UI thread when the system is about to suspend.</summary>
+    /// <remarks>
+    /// Delivered before the machine goes down and on a deadline Windows does not extend, so
+    /// subscribers must start their work and return rather than block this notification.
+    /// </remarks>
+    public event Action? SystemSuspending;
+
+    /// <summary>Raised on the Avalonia UI thread when the system resumed from suspend.</summary>
+    /// <remarks>
+    /// Raised for PBT_APMRESUMEAUTOMATIC and PBT_APMRESUMESUSPEND alike. Windows sends the first
+    /// on every resume and adds the second only when the user caused it, so a subscriber that
+    /// listened for one of them would miss half the wakes; it can fire twice for one resume and
+    /// subscribers must be idempotent.
+    /// </remarks>
+    public event Action? SystemResumed;
+
     /// <summary>Raised on the Avalonia UI thread for a shell-hook notification.
     /// Its delegate receives the HSHELL_* event code followed by the event-specific
     /// lParam supplied by the shell.</summary>
@@ -72,6 +122,7 @@ public sealed unsafe class MessageWindow : IDisposable
         var hwnd = CreateMessageOnlyWindow(
             "WSGM.MessageWindow", &WndProc, "Failed to create message window");
         _instance = new MessageWindow { _hwnd = hwnd };
+        _instance.RegisterSessionNotifications();
         return _instance;
     }
 
@@ -121,8 +172,8 @@ public sealed unsafe class MessageWindow : IDisposable
         Log.Info("Shell-hook window deregistered.");
     }
 
-    /// <summary>Subscribes this window to display on/off notifications and to session
-    /// unlock. Idempotent; safe to call when the feature toggle turns on at runtime.
+    /// <summary>Subscribes this window to display on/off notifications. Idempotent;
+    /// safe to call when the feature toggle turns on at runtime.
     ///
     /// <para>THREE power settings are registered, not one.
     /// <c>GUID_SESSION_DISPLAY_STATUS</c> is the primary and the only one that describes
@@ -149,28 +200,16 @@ public sealed unsafe class MessageWindow : IDisposable
             _hwnd, NativeMethods.GuidConsoleDisplayState, NativeMethods.DeviceNotifyWindowHandle);
         _legacyDisplayNotify = NativeMethods.RegisterPowerSettingNotification(
             _hwnd, NativeMethods.GuidMonitorPowerOn, NativeMethods.DeviceNotifyWindowHandle);
-        if (!_sessionNotify)
-        {
-            _sessionNotify = NativeMethods.WTSRegisterSessionNotification(
-                _hwnd, NativeMethods.NotifyForThisSession);
-            if (!_sessionNotify)
-            {
-                Log.Warn("WTSRegisterSessionNotification failed "
-                    + $"(error {Marshal.GetLastWin32Error()}).");
-            }
-        }
         Log.Info($"Display-state notifications registered (session={_displayNotify != 0}, "
-            + $"console={_consoleDisplayNotify != 0}, legacy={_legacyDisplayNotify != 0}, "
-            + $"unlock={_sessionNotify}).");
+            + $"console={_consoleDisplayNotify != 0}, legacy={_legacyDisplayNotify != 0}).");
         return _displayNotify != 0;
     }
 
-    /// <summary>Stops this window receiving display on/off and session-unlock
-    /// notifications.</summary>
+    /// <summary>Stops this window receiving display on/off notifications.</summary>
     public void DeregisterDisplayStateNotifications()
     {
         var any = _displayNotify != 0 || _consoleDisplayNotify != 0
-            || _legacyDisplayNotify != 0 || _sessionNotify;
+            || _legacyDisplayNotify != 0;
         if (!any)
         {
             return;
@@ -178,16 +217,33 @@ public sealed unsafe class MessageWindow : IDisposable
         UnregisterPowerSetting(ref _displayNotify, "session display status");
         UnregisterPowerSetting(ref _consoleDisplayNotify, "console display state");
         UnregisterPowerSetting(ref _legacyDisplayNotify, "monitor power on");
-        if (_sessionNotify)
-        {
-            if (!NativeMethods.WTSUnRegisterSessionNotification(_hwnd))
-            {
-                Log.Warn("WTSUnRegisterSessionNotification failed "
-                    + $"(error {Marshal.GetLastWin32Error()}).");
-            }
-            _sessionNotify = false;
-        }
         Log.Info("Display-state notifications deregistered.");
+    }
+
+    private void RegisterSessionNotifications()
+    {
+        _sessionNotify = NativeMethods.WTSRegisterSessionNotification(
+            _hwnd,
+            NativeMethods.NotifyForThisSession);
+        if (!_sessionNotify)
+        {
+            Log.Warn("WTSRegisterSessionNotification failed "
+                + $"(error {Marshal.GetLastWin32Error()}).");
+        }
+    }
+
+    private void UnregisterSessionNotifications()
+    {
+        if (!_sessionNotify)
+        {
+            return;
+        }
+        if (!NativeMethods.WTSUnRegisterSessionNotification(_hwnd))
+        {
+            Log.Warn("WTSUnRegisterSessionNotification failed "
+                + $"(error {Marshal.GetLastWin32Error()}).");
+        }
+        _sessionNotify = false;
     }
 
     /// <summary>Subscribes this window to volume arrival and removal. Idempotent.
@@ -195,8 +251,7 @@ public sealed unsafe class MessageWindow : IDisposable
     /// <remarks>
     /// This replaces guessing at a card reader's identity. The Playnite-era approach
     /// watched WMI for a <c>Win32_DiskDrive</c> whose model matched a hard-coded
-    /// string, which only ever worked for the reader it was written against — and
-    /// WMI is COM, which a NativeAOT WSGM cannot use at all. A device-interface
+    /// string, which only ever worked for the reader it was written against. A device-interface
     /// registration for <c>GUID_DEVINTERFACE_VOLUME</c> is reader-agnostic, bus
     /// agnostic and pure Win32.
     /// </remarks>
@@ -343,12 +398,36 @@ public sealed unsafe class MessageWindow : IDisposable
             }
             return 1;
         }
-        if (msg == NativeMethods.WmWtsSessionChange
-            && wParam == NativeMethods.WtsSessionUnlock
-            && instance._sessionNotify)
+        if (msg == NativeMethods.WmPowerBroadcast
+            && wParam == NativeMethods.PbtApmSuspend)
         {
-            Dispatcher.UIThread.Post(() => instance.SessionUnlocked?.Invoke());
-            return 0;
+            Dispatcher.UIThread.Post(() => instance.SystemSuspending?.Invoke());
+            return 1;
+        }
+        if (msg == NativeMethods.WmPowerBroadcast
+            && (wParam == NativeMethods.PbtApmResumeAutomatic
+                || wParam == NativeMethods.PbtApmResumeSuspend))
+        {
+            Dispatcher.UIThread.Post(() => instance.SystemResumed?.Invoke());
+            return 1;
+        }
+        if (msg == NativeMethods.WmWtsSessionChange && instance._sessionNotify)
+        {
+            if (wParam == NativeMethods.WtsSessionLock)
+            {
+                Dispatcher.UIThread.Post(() => instance.SessionLocked?.Invoke());
+                return 0;
+            }
+            if (wParam == NativeMethods.WtsSessionUnlock)
+            {
+                Dispatcher.UIThread.Post(() => instance.SessionUnlocked?.Invoke());
+                return 0;
+            }
+            if (wParam == NativeMethods.WtsSessionLogoff)
+            {
+                Dispatcher.UIThread.Post(() => instance.SessionEnding?.Invoke());
+                return 0;
+            }
         }
         if (msg == NativeMethods.WmDeviceChange && instance._volumeNotify != 0
             && (wParam == NativeMethods.DbtDeviceArrival
@@ -374,6 +453,7 @@ public sealed unsafe class MessageWindow : IDisposable
     {
         DeregisterShellHook();
         DeregisterDisplayStateNotifications();
+        UnregisterSessionNotifications();
         DeregisterVolumeNotifications();
         if (_hwnd != 0)
         {

@@ -10,25 +10,29 @@
 # AGENTS.md and every CLAUDE.md symlink beside one ARE tracked on purpose — they are
 # the instructions a contributor's AI reads, so they have to ship with the repo.
 .claude/
-.codex/
+# Excluded per-entry rather than as a directory: git cannot re-include a file inside an excluded
+# directory, and config.toml below has to stay tracked.
+.codex/*
+# ...except Codex's project-scoped server config, which is shared tooling rather than session
+# state: it attaches an MCP client to Steam's CEF port and is identical on every machine.
+!.codex/config.toml
 .cursor/
 .aider*
 
-# Steam Input Lease build output, staged from native/SteamInput by
+# Steam Input Lease build output, staged from the native/SteamInput submodule by
 # eng/build-steam-input-lease.ps1 on every build. Generated, never committed —
-# the library source in native/SteamInput is the tracked copy.
+# the library source lives in KillerPixelCrew/steam-input-lease.
 /src/WSGM/Native/SteamInputLease/
-/src/WSGM/Native/Radio/
-
-# The vendored Rust library's own build output.
-/native/SteamInput/target/
-/native/Radio/target/
-/native/Standby/target/
+/src/WSGM/Native/Viiper/
 
 # Vendored upstream source builds in place; only its sources are tracked.
 /third_party/**/bin/
 /third_party/**/obj/
-/native/SteamInput/artifacts/
+
+# Generated caches left by revisions that used the retired release-acquisition workflow. Current
+# builds use the source submodules and never read these directories.
+/third_party/devicelab/staging/
+/third_party/claw-plugin/staging/
 
 # User-specific files
 *.rsuser
@@ -508,5 +512,5 @@ $RECYCLE.BIN/
 # External reference clones (nested repos, not part of WSGM)
 _ref/
 
-# Local MCP server config (per-machine)
-.mcp.json
+# The MCP server config is tracked: it holds no machine-specific path, only the loopback CDP port
+# Steam already listens on, so every contributor gets the same Steam UI tooling.

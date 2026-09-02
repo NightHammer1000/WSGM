@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using WSGM.LogonService.Interop;
@@ -68,7 +69,10 @@ internal static class ServiceInstaller
             {
                 ApplyDescription(service);
                 ApplyFailureActions(service);
-                StartForInstall(service);
+                if (!StartForInstall(service))
+                {
+                    return 1;
+                }
             }
             finally
             {
@@ -89,7 +93,7 @@ internal static class ServiceInstaller
     /// host's catch-up sweep would treat the live session as an autologon that beat
     /// the service and run a full game-mode boot takeover in the middle of setup.</para></summary>
     /// <param name="service">An open service handle with start rights.</param>
-    private static unsafe void StartForInstall(nint service)
+    private static unsafe bool StartForInstall(nint service)
     {
         var started = false;
         fixed (char* tag = ServiceHost.InstallStartArgument)
@@ -100,13 +104,16 @@ internal static class ServiceInstaller
         }
         if (started)
         {
-            return;
+            return true;
         }
         var error = Marshal.GetLastWin32Error();
-        if (error != NativeMethods.ErrorServiceAlreadyRunning)
+        if (error == NativeMethods.ErrorServiceAlreadyRunning)
         {
-            ServiceLog.Warn($"Install: StartService failed (error {error}) — it will start at next boot.");
+            return true;
         }
+
+        ServiceLog.Error($"Install: StartService failed (error {error}).");
+        return false;
     }
 
     /// <summary>Stops (bounded) and deletes the service. A missing service is
@@ -129,14 +136,44 @@ internal static class ServiceInstaller
             }
             try
             {
-                if (NativeMethods.ControlService(service, NativeMethods.ServiceControlStop, out _))
+                if (!NativeMethods.QueryServiceStatus(service, out var status))
                 {
-                    var deadline = DateTime.UtcNow + StopTimeout;
-                    while (DateTime.UtcNow < deadline &&
-                           NativeMethods.QueryServiceStatus(service, out var status) &&
-                           status.dwCurrentState != NativeMethods.ServiceStopped)
+                    ServiceLog.Error(
+                        $"Uninstall: initial service-state query failed "
+                            + $"(error {Marshal.GetLastWin32Error()}).");
+                    return 1;
+                }
+
+                if (status.dwCurrentState != NativeMethods.ServiceStopped)
+                {
+                    if (!NativeMethods.ControlService(service, NativeMethods.ServiceControlStop, out _)
+                        && Marshal.GetLastWin32Error() != NativeMethods.ErrorServiceNotActive)
+                    {
+                        ServiceLog.Error(
+                            $"Uninstall: service stop failed (error {Marshal.GetLastWin32Error()}).");
+                        return 1;
+                    }
+
+                    Stopwatch elapsed = Stopwatch.StartNew();
+                    do
                     {
                         Thread.Sleep(250);
+                        if (!NativeMethods.QueryServiceStatus(service, out status))
+                        {
+                            ServiceLog.Error(
+                                $"Uninstall: service-state query failed while stopping "
+                                    + $"(error {Marshal.GetLastWin32Error()}).");
+                            return 1;
+                        }
+                    }
+                    while (status.dwCurrentState != NativeMethods.ServiceStopped
+                        && elapsed.Elapsed < StopTimeout);
+
+                    if (status.dwCurrentState != NativeMethods.ServiceStopped)
+                    {
+                        ServiceLog.Error(
+                            "Uninstall: service did not reach the stopped state; deletion refused.");
+                        return 1;
                     }
                 }
                 if (!NativeMethods.DeleteService(service))

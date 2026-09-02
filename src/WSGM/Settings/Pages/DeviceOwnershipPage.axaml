@@ -1,0 +1,81 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:s="using:WSGM.Settings"
+             x:Class="WSGM.Settings.Pages.DeviceOwnershipPage"
+             x:DataType="s:SettingsViewModel">
+    <Border Padding="16,10,16,10">
+        <Grid ColumnDefinitions="*,24,*">
+            <StackPanel Grid.Column="0">
+                <Border Classes="section-header">
+                    <TextBlock Text="OWNERSHIP" />
+                </Border>
+                <Border Classes="setting-row alt">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="Device Integration" Classes="setting-title" />
+                            <TextBlock Text="Let the resident WSGM shell use the one administrator-installed device plugin. Off loads no plugin and touches no hardware." Classes="caption" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding DeviceIntegrationEnabled}" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="Controller management" Classes="setting-title" />
+                            <TextBlock Text="Remember whether WSGM may acquire the built-in controller and create the selected managed target." Classes="caption" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding DeviceControllerManagementEnabled}"
+                                      IsEnabled="{Binding DeviceIntegrationEnabled}" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row alt">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="AutoTDP" Classes="setting-title" />
+                            <TextBlock Text="Move the power limit from measured frame delivery: more power when frames miss their deadline, less when they have room to spare. A manual power change pauses it until you turn it back on." Classes="caption" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding DeviceAutoTdpEnabled}"
+                                      IsEnabled="{Binding DeviceIntegrationEnabled}" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+                <Border Classes="section-header">
+                    <TextBlock Text="RUNNING OWNER" />
+                </Border>
+                <Border Classes="setting-row alt">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="{Binding DeviceOwnerStatusText}" Classes="caption" TextWrapping="Wrap" VerticalAlignment="Center" />
+                        <Button Grid.Column="1" Content="Refresh" Click="OnRefreshStatus" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+            </StackPanel>
+
+            <StackPanel Grid.Column="2">
+                <Border Classes="section-header">
+                    <TextBlock Text="POLICY" />
+                </Border>
+                <Border Classes="setting-row alt">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="Managed controller target" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="190" SelectedIndex="{Binding DeviceControllerTargetIndex}">
+                            <ComboBoxItem Content="Steam Deck Composite" />
+                            <ComboBoxItem Content="Xbox 360" />
+                            <ComboBoxItem Content="DualShock 4" />
+                        </ComboBox>
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row alt">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="Physical glyphs" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="190" SelectedIndex="{Binding DeviceGlyphSelectionIndex}">
+                            <ComboBoxItem Content="Automatic exact profile" />
+                            <ComboBoxItem Content="Steam native" />
+                            <ComboBoxItem Content="Reviewed profile" />
+                        </ComboBox>
+                    </Grid>
+                </Border>
+                <TextBlock Margin="10,10,10,0" Classes="caption" TextWrapping="Wrap"
+                           Text="Hardware controls and profiles live in the overlay's Device destination. Settings owns only startup and top-level ownership policy." />
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>

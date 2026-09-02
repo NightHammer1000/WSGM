@@ -26,8 +26,8 @@ Input block, or both. WSGM writes its command into a game's launch options over 
   injects into an elevated `steam.exe` and a medium process cannot.
 - Lease failures fail **open**: log, tell the user, launch the game anyway. A held controller is a
   degraded experience; a game that will not start is a broken one.
-- `SteamInterop\*.cs` is linked from `src\WSGM`, not copied. Treat it as the mirror it is and change it
-  in `native\SteamInput\bindings` first.
+- `SteamInterop\*.cs` is linked directly from the canonical
+  `native\SteamInput\bindings\SteamInterop.Net` source. Change the ABI there and in Rust together.
 
 ## The two lease flags
 

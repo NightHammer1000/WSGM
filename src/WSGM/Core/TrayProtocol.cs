@@ -26,8 +26,8 @@ public static class TrayProtocol
     /// <summary>COPYDATASTRUCT.dwData for SHAppBarMessage traffic (stubbed).</summary>
     public const int CopyDataAppBar = 0;
 
-    /// <summary>COPYDATASTRUCT.dwData for SHLoadInProc (COM shell service objects;
-    /// rejected — WSGM is COM-free).</summary>
+    /// <summary>COPYDATASTRUCT.dwData for SHLoadInProc requests, which WSGM rejects because it
+    /// owns the corresponding system surfaces instead of hosting Explorer extensions.</summary>
     public const int CopyDataLoadInProc = 2;
 
     /// <summary>COPYDATASTRUCT.dwData for Shell_NotifyIconGetRect queries.</summary>
@@ -73,21 +73,9 @@ public static class TrayProtocol
     /// <summary>The largest window message value (message numbers are 16-bit).</summary>
     public const uint MaxWindowMessage = 0xFFFF;
 
-    /// <summary>Whether a registered uCallbackMessage may be RELAYED to its owner
-    /// window. The callback message arrives over an attacker-reachable wire — any
-    /// Medium-IL process can register an icon naming a foreign HWND (the wire HWND
-    /// is stored verbatim), and the relay runs outbound from WSGM's High IL where
-    /// UIPI imposes no restriction — so a system-defined callback below WM_USER
-    /// would let a caller drive WM_CLOSE or WM_SYSCOMMAND into elevated UI.
-    /// Refusing those costs nothing real: no tray implementation registers a
-    /// system message as its callback (see the range note on <see cref="WmUser"/>).
-    ///
-    /// This is a decision helper for the RELAY only, and registration deliberately
-    /// does not consult it: rejecting a NIM_ADD makes shell32 report failure to the
-    /// caller and well-behaved apps then re-add in a loop (see
-    /// <see cref="TrayChange.Rejected"/>). An icon whose callback is not relayable
-    /// must still register, still render, and still keep its tooltip — only the
-    /// click relay is refused.</summary>
+    /// <summary>Whether a registered callback is in Windows' application-defined message range.
+    /// This governs activation only: registration remains successful for compatibility with
+    /// shell32 retry behavior.</summary>
     /// <param name="callbackMessage">The registered uCallbackMessage value.</param>
     public static bool IsRelayableCallback(uint callbackMessage)
         => callbackMessage is >= WmUser and <= MaxWindowMessage;

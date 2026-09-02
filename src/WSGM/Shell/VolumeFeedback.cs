@@ -1,8 +1,8 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using WindowsDeviceControl;
 using WSGM.Core;
-using WSGM.Interop;
 
 namespace WSGM.Shell;
 
@@ -11,22 +11,23 @@ namespace WSGM.Shell;
 internal static class VolumeFeedback
 {
     private const long MinimumIntervalMs = 90;
+    private static readonly object PlayerGate = new();
     private static long _lastRequestedAt;
-    private static int _helperUnavailable;
     private static int _initializationState;
     private static int _reinitializeRequested;
     private static int _reinitializeWorkerRunning;
+    private static WaveOutFeedback? _player;
 
-    /// <summary>Preopens the native playback stream away from the UI thread, so
-    /// the first volume input never pays the device-open latency.</summary>
+    /// <summary>Preopens the playback stream away from the UI thread, so the
+    /// first volume input never pays the device-open latency.</summary>
     internal static void Initialize()
     {
-        if (Volatile.Read(ref _helperUnavailable) != 0
-            || Interlocked.CompareExchange(ref _initializationState, 1, 0) != 0)
+        if (Interlocked.CompareExchange(ref _initializationState, 1, 0) != 0)
         {
             return;
         }
-        _ = Task.Run(InitializeCore);
+        Interlocked.Exchange(ref _reinitializeRequested, 1);
+        StartReinitializeWorker();
     }
 
     /// <summary>Reopens the mapped playback stream after the system default
@@ -34,10 +35,6 @@ internal static class VolumeFeedback
     /// retained so the final stream always follows the newest default.</summary>
     internal static void Reinitialize()
     {
-        if (Volatile.Read(ref _helperUnavailable) != 0)
-        {
-            return;
-        }
         Interlocked.Exchange(ref _reinitializeRequested, 1);
         Interlocked.Exchange(ref _initializationState, 1);
         StartReinitializeWorker();
@@ -56,8 +53,6 @@ internal static class VolumeFeedback
                 InitializeCore();
             }
             Interlocked.Exchange(ref _reinitializeWorkerRunning, 0);
-            // Close the race where a request arrived after the loop's final
-            // exchange but before the worker marked itself idle.
             if (Volatile.Read(ref _reinitializeRequested) != 0)
             {
                 StartReinitializeWorker();
@@ -67,40 +62,29 @@ internal static class VolumeFeedback
 
     private static void InitializeCore()
     {
-        try
+        var result = WaveOutFeedback.Open(out var replacement);
+        if (result < 0 || replacement is null)
         {
-            var result = NativeVolumeControl.InitializeFeedback();
-            if (result < 0)
-            {
-                Log.Warn($"Volume feedback initialization failed (HRESULT 0x{result:X8}).");
-                Interlocked.Exchange(ref _initializationState, 0);
-            }
-            else
-            {
-                Interlocked.Exchange(ref _initializationState, 2);
-            }
-        }
-        catch (DllNotFoundException ex)
-        {
-            Disable(ex);
-        }
-        catch (EntryPointNotFoundException ex)
-        {
-            Disable(ex);
-        }
-    }
-
-    /// <summary>Requests one soft feedback sound. Calls are paced to the cue
-    /// length, and the native helper drops any overlap, so held controls cannot
-    /// build a delayed playback queue.</summary>
-    internal static void Play()
-    {
-        Initialize();
-        if (Volatile.Read(ref _helperUnavailable) != 0)
-        {
+            Log.Warn($"Volume feedback initialization failed (HRESULT 0x{result:X8}).");
+            Interlocked.Exchange(ref _initializationState, 0);
             return;
         }
 
+        lock (PlayerGate)
+        {
+            var previous = _player;
+            _player = replacement;
+            previous?.Dispose();
+        }
+        Interlocked.Exchange(ref _initializationState, 2);
+    }
+
+    /// <summary>Requests one soft feedback sound. Calls are paced to the cue
+    /// length and overlap is dropped, so held controls cannot build a delayed
+    /// playback queue.</summary>
+    internal static void Play()
+    {
+        Initialize();
         var now = Environment.TickCount64;
         while (true)
         {
@@ -115,31 +99,24 @@ internal static class VolumeFeedback
             }
         }
 
+        if (!Monitor.TryEnter(PlayerGate))
+        {
+            return;
+        }
         try
         {
-            var result = NativeVolumeControl.PlayFeedback();
+            var result = _player?.Play() ?? 1;
             if (result < 0)
             {
                 Log.Warn($"Volume feedback sound failed (HRESULT 0x{result:X8}).");
+                _player?.Dispose();
+                _player = null;
                 Interlocked.Exchange(ref _initializationState, 0);
             }
         }
-        catch (DllNotFoundException ex)
+        finally
         {
-            Disable(ex);
-        }
-        catch (EntryPointNotFoundException ex)
-        {
-            Disable(ex);
-        }
-    }
-
-    private static void Disable(Exception ex)
-    {
-        Interlocked.Exchange(ref _initializationState, 0);
-        if (Interlocked.Exchange(ref _helperUnavailable, 1) == 0)
-        {
-            Log.Error("Volume feedback sound disabled: WSGM.VolumeControl.dll is unavailable.", ex);
+            Monitor.Exit(PlayerGate);
         }
     }
 }

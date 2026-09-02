@@ -7,6 +7,8 @@ namespace WSGM.Launch;
 
 internal static class LaunchLog
 {
+    private const long MaximumBytes = 2 * 1024 * 1024;
+    private const int RetainedArchives = 3;
     private static readonly object Gate = new();
     private static readonly string Path = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -31,6 +33,7 @@ internal static class LaunchLog
                 {
                     try
                     {
+                        RotateIfNeeded();
                         File.AppendAllText(Path, line, Encoding.UTF8);
                         return;
                     }
@@ -45,6 +48,25 @@ internal static class LaunchLog
         {
             // A launch wrapper must never fail merely because diagnostics cannot
             // be written (concurrent helper, full disk, damaged profile, ...).
+        }
+    }
+
+    private static void RotateIfNeeded()
+    {
+        if (!File.Exists(Path) || new FileInfo(Path).Length < MaximumBytes)
+        {
+            return;
+        }
+
+        for (int index = RetainedArchives; index >= 1; index--)
+        {
+            string source = index == 1 ? Path : $"{Path}.{index - 1}";
+            if (!File.Exists(source))
+            {
+                continue;
+            }
+
+            File.Move(source, $"{Path}.{index}", overwrite: true);
         }
     }
 }

@@ -4,11 +4,10 @@
              xmlns:c="using:WSGM.Controls"
              x:Class="WSGM.Settings.Pages.SteamPage"
              x:DataType="s:SettingsViewModel">
-    <!-- The old "Home" page. Element order preserved (controller tab order):
-         Big Picture info → Steam status → auto-relaunch → Steam Input management →
-         UAC → lock-on-wake.
+    <!-- Element order is the controller tab order: Big Picture info → Steam
+         status → auto-relaunch → Steam Input management → UAC → lock-on-wake.
          The CEF integration toggles live on their own Integration tab: with them
-         here the right column no longer fit the 1024x640 layout floor. -->
+         here the right column no longer fits the 1024x640 layout floor. -->
     <Border Padding="16,10,16,10">
         <Grid ColumnDefinitions="*,24,*">
             <StackPanel Grid.Column="0">
@@ -43,6 +42,19 @@
                             <TextBlock Text="Automatically bring Big Picture back after Steam closes." Classes="caption" />
                         </StackPanel>
                         <ToggleSwitch Grid.Column="1" IsChecked="{Binding SteamAutoRelaunch}" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+
+                <Border Classes="setting-row">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="Start Steam unelevated" Classes="setting-title" />
+                            <TextBlock
+                                Text="Runs the whole Steam client at normal integrity so games it starts are not elevated. Off starts Steam at WSGM's own integrity."
+                                TextWrapping="Wrap"
+                                Classes="caption" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding SteamLaunchUnelevated}" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
 

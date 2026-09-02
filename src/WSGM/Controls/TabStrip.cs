@@ -40,15 +40,11 @@ public sealed class TabStripItem
 /// <summary>Event data for <see cref="TabStrip.SelectionChanged"/>.</summary>
 public sealed class TabStripSelectionChangedEventArgs : EventArgs
 {
-    internal TabStripSelectionChangedEventArgs(int oldIndex, int newIndex, TabStripItem? selectedItem)
+    internal TabStripSelectionChangedEventArgs(int newIndex, TabStripItem? selectedItem)
     {
-        OldIndex = oldIndex;
         NewIndex = newIndex;
         SelectedItem = selectedItem;
     }
-
-    /// <summary>Gets the previously selected tab index.</summary>
-    public int OldIndex { get; }
 
     /// <summary>Gets the newly selected tab index.</summary>
     public int NewIndex { get; }
@@ -78,10 +74,6 @@ public sealed class TabStrip : TemplatedControl
     public static readonly StyledProperty<int> SelectedIndexProperty =
         AvaloniaProperty.Register<TabStrip, int>(nameof(SelectedIndex));
 
-    /// <summary>Defines the Avalonia property that shows or hides the LB/RB bumper chips.</summary>
-    public static readonly StyledProperty<bool> ShowBumperHintsProperty =
-        AvaloniaProperty.Register<TabStrip, bool>(nameof(ShowBumperHints), true);
-
     private readonly List<Button> _tabButtons = new();
     private Panel? _tabsHost;
 
@@ -99,13 +91,6 @@ public sealed class TabStrip : TemplatedControl
     {
         get => GetValue(SelectedIndexProperty);
         set => SetValue(SelectedIndexProperty, value);
-    }
-
-    /// <summary>Gets or sets whether the LB/RB bumper hint chips at the ends are shown.</summary>
-    public bool ShowBumperHints
-    {
-        get => GetValue(ShowBumperHintsProperty);
-        set => SetValue(ShowBumperHintsProperty, value);
     }
 
     /// <summary>Raised after <see cref="SelectedIndex"/> changes, whether by tab button
@@ -139,10 +124,10 @@ public sealed class TabStrip : TemplatedControl
         else if (change.Property == SelectedIndexProperty)
         {
             ApplySelectionClasses();
-            var (oldIndex, newIndex) = change.GetOldAndNewValue<int>();
+            var newIndex = change.GetNewValue<int>();
             var tabs = Tabs;
             var selected = tabs is not null && newIndex >= 0 && newIndex < tabs.Count ? tabs[newIndex] : null;
-            SelectionChanged?.Invoke(this, new TabStripSelectionChangedEventArgs(oldIndex, newIndex, selected));
+            SelectionChanged?.Invoke(this, new TabStripSelectionChangedEventArgs(newIndex, selected));
         }
     }
 

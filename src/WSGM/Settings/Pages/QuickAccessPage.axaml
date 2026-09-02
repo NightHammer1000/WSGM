@@ -3,44 +3,34 @@
              xmlns:s="using:WSGM.Settings"
              x:Class="WSGM.Settings.Pages.QuickAccessPage"
              x:DataType="s:SettingsViewModel">
-    <!-- Quick access + taskbar surfaces. Element order preserved (controller tab
-         order): panel test → taskbar test → lease toggle → glyph style →
-         hotkey recorder → chord recorder → bottom edge → right edge →
-         Steam menu edge → Steam QAM edge. -->
+    <!-- Quick access sheet. Element order preserved (controller tab order):
+         sheet test → lease toggle → glyph style → hotkey recorder → chord
+         recorder → top edge → bottom edge → Steam menu edge → Steam QAM edge. -->
     <Border Padding="16,10,16,10">
         <Grid ColumnDefinitions="*,24,*">
             <StackPanel Grid.Column="0">
                 <Border Classes="section-header">
-                    <TextBlock Text="PANELS" />
+                    <TextBlock Text="QUICK ACCESS" />
                 </Border>
                 <Border Classes="setting-row alt">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                         <StackPanel VerticalAlignment="Center" Spacing="1">
-                            <TextBlock Text="Right-side quick panel" Classes="setting-title" />
-                            <TextBlock Text="A Steam-QAM-style panel that slides in from the right edge and leaves the game visible." Classes="caption" />
+                            <TextBlock Text="Quick access sheet" Classes="setting-title" />
+                            <TextBlock Text="Slides down from the top edge over the game: pinned rows, session, Steam, device, tools and power, and your open programs with tray icons. Tap the strip of game left visible below it to close." Classes="caption" />
                         </StackPanel>
-                        <Button Grid.Column="1" Content="Test panel" Click="OnTestOverlay" VerticalAlignment="Center" />
+                        <Button Grid.Column="1" Content="Test sheet" Click="OnTestOverlay" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
                 <Border Classes="setting-row">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                         <StackPanel VerticalAlignment="Center" Spacing="1">
-                            <TextBlock Text="Game-mode taskbar" Classes="setting-title" />
-                            <TextBlock Text="A thin bottom bar with your open programs and tray icons — swipe up from the bottom edge in game mode." Classes="caption" />
-                        </StackPanel>
-                        <Button Grid.Column="1" Content="Test taskbar" Click="OnTestTaskbar" VerticalAlignment="Center" />
-                    </Grid>
-                </Border>
-                <Border Classes="setting-row alt">
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                        <StackPanel VerticalAlignment="Center" Spacing="1">
-                            <TextBlock Text="Block Steam Input while panels are open" Classes="setting-title" />
-                            <TextBlock Text="Keeps the controller usable in quick access and the taskbar by leasing it away from Steam Input. Turn off to leave Steam completely untouched — panels may then only react to touch while Steam's desktop profile holds the controller." Classes="caption" />
+                            <TextBlock Text="Block Steam Input while the sheet is open" Classes="setting-title" />
+                            <TextBlock Text="Keeps the controller usable in quick access by leasing it away from Steam Input. Turn off to leave Steam completely untouched — the sheet may then only react to touch while Steam's desktop profile holds the controller." Classes="caption" />
                         </StackPanel>
                         <ToggleSwitch Grid.Column="1" IsChecked="{Binding SteamInputLeaseEnabled}" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
-                <Border Classes="setting-row">
+                <Border Classes="setting-row alt">
                     <Grid ColumnDefinitions="*,150" ColumnSpacing="8">
                         <StackPanel VerticalAlignment="Center" Spacing="1">
                             <TextBlock Text="Controller button glyphs" Classes="setting-title" />
@@ -76,22 +66,21 @@
                     </Grid>
                 </Border>
                 <Border Classes="setting-row alt">
-                    <Grid ColumnDefinitions="*,150,Auto" ColumnSpacing="8">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                         <StackPanel VerticalAlignment="Center" Spacing="1">
-                            <TextBlock Text="Swipe from the bottom edge" Classes="setting-title" />
-                            <TextBlock Text="A short upward swipe opens the taskbar (game mode) or the panel." Classes="caption" />
+                            <TextBlock Text="Swipe from the top edge" Classes="setting-title" />
+                            <TextBlock Text="A short downward swipe opens quick access." Classes="caption" />
                         </StackPanel>
-                        <ComboBox Grid.Column="1" ItemsSource="{Binding BottomEdgeActions}" SelectedIndex="{Binding BottomEdgeActionIndex}" VerticalAlignment="Center" />
-                        <ToggleSwitch Grid.Column="2" IsChecked="{Binding GestureBottom}" VerticalAlignment="Center" />
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding GestureTop}" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
                 <Border Classes="setting-row">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                         <StackPanel VerticalAlignment="Center" Spacing="1">
-                            <TextBlock Text="Swipe from the right edge" Classes="setting-title" />
-                            <TextBlock Text="Open the panel with a short leftward swipe." Classes="caption" />
+                            <TextBlock Text="Swipe from the bottom edge" Classes="setting-title" />
+                            <TextBlock Text="A short upward swipe opens quick access on your open programs (game mode only — on the desktop that edge belongs to the Windows taskbar)." Classes="caption" />
                         </StackPanel>
-                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding GestureRight}" VerticalAlignment="Center" />
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding GestureBottom}" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
                 <Border Classes="setting-row alt">
@@ -106,10 +95,10 @@
                 <Border Classes="setting-row">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                         <StackPanel VerticalAlignment="Center" Spacing="1">
-                            <TextBlock Text="Swipe from the top edge" Classes="setting-title" />
-                            <TextBlock Text="Send Ctrl+2 to open Steam Big Picture's Quick Access Menu, including over a running game." Classes="caption" />
+                            <TextBlock Text="Swipe from the right edge" Classes="setting-title" />
+                            <TextBlock Text="Send Ctrl+2 to open Steam Big Picture's Quick Access Menu, including over a running game — the SteamOS layout." Classes="caption" />
                         </StackPanel>
-                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding GestureTopSteamQuickAccess}" VerticalAlignment="Center" />
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding GestureRightSteamQuickAccess}" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
             </StackPanel>

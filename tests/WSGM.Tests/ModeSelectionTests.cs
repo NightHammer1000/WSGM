@@ -5,7 +5,7 @@ public sealed class ModeSelectionTests
     [Fact]
     public void ExplicitShellModeHasHighestPrecedence()
     {
-        var mode = Program.DecideMode(["--settings", "--overlay-test", "--SHELL"], false, true);
+        var mode = Program.DecideMode(["--settings", "--overlay-test", "--SHELL"]);
 
         Assert.Equal(RunMode.Shell, mode);
     }
@@ -13,7 +13,7 @@ public sealed class ModeSelectionTests
     [Fact]
     public void ExplicitSettingsModeWinsOverOverlayTest()
     {
-        var mode = Program.DecideMode(["--overlay-test", "--settings"], true, false);
+        var mode = Program.DecideMode(["--overlay-test", "--settings"]);
 
         Assert.Equal(RunMode.Settings, mode);
     }
@@ -24,30 +24,23 @@ public sealed class ModeSelectionTests
         // The only local surface that exercises the overlay without a takeover; every
         // other test in this file passes --overlay-test as a LOSER of the precedence
         // rules, so deleting its branch would go unnoticed without this one.
-        var mode = Program.DecideMode(["--OVERLAY-TEST"], false, true);
+        var mode = Program.DecideMode(["--OVERLAY-TEST"]);
 
         Assert.Equal(RunMode.OverlayTest, mode);
     }
 
-    [Theory]
-    [InlineData(true, false, RunMode.Shell)]
-    [InlineData(true, true, RunMode.Settings)]
-    [InlineData(false, false, RunMode.Settings)]
-    [InlineData(false, true, RunMode.Settings)]
-    public void AutoModeRequiresTheRegisteredShellAndNoDesktop(
-        bool registeredAsShell,
-        bool desktopAlive,
-        RunMode expected)
+    [Fact]
+    public void NoFlagSelectsTheSafeSettingsMode()
     {
-        var mode = Program.DecideMode([], registeredAsShell, desktopAlive);
+        var mode = Program.DecideMode([]);
 
-        Assert.Equal(expected, mode);
+        Assert.Equal(RunMode.Settings, mode);
     }
 
     [Fact]
-    public void ServiceBootSelectsShellModeEvenWithADesktopAlive()
+    public void ServiceBootSelectsShellMode()
     {
-        var mode = Program.DecideMode(["--BOOT"], false, true);
+        var mode = Program.DecideMode(["--BOOT"]);
 
         Assert.Equal(RunMode.Shell, mode);
     }
@@ -55,7 +48,7 @@ public sealed class ModeSelectionTests
     [Fact]
     public void ServiceBootOutranksSettingsAndOverlayTest()
     {
-        var mode = Program.DecideMode(["--settings", "--overlay-test", "--boot"], false, true);
+        var mode = Program.DecideMode(["--settings", "--overlay-test", "--boot"]);
 
         Assert.Equal(RunMode.Shell, mode);
     }
@@ -69,4 +62,5 @@ public sealed class ModeSelectionTests
     {
         Assert.Equal(expected, Program.IsServiceBoot(args));
     }
+
 }

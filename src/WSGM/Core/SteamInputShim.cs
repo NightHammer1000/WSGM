@@ -57,27 +57,17 @@ public readonly record struct SteamInputShimStatus(
 /// <summary>Owns the Steam Input shim that lives in Steam's own install directory.
 /// </summary>
 /// <remarks>
-/// <para>
 /// The payload is deployed as a search-order proxy DLL so Steam loads it itself and
-/// WSGM never injects. The vector is only a door: once the image is mapped the gate
-/// installs the same process-wide hooks the injected build used.
-/// </para>
-/// <para>
-/// Two rules in here are load-bearing and easy to undo by accident.
-/// <b>Never overwrite a file this class cannot prove is its own</b> - ValvePlug and
-/// Special K claim the same names, and clobbering one silently breaks a tool the
-/// user installed on purpose. And <b>never move onto an existing destination</b>
-/// when parking or restoring: <c>MOVEFILE_REPLACE_EXISTING</c> fails against a
-/// mapped image, which is the very reason disabling parks the file instead of
-/// deleting it.
-/// </para>
+/// WSGM never injects. The load-bearing deployment rules — byte-proven ownership,
+/// no move-onto-existing while mapped, cold-start-only replacement — are documented
+/// in Core's <c>AGENTS.md</c> under "Steam Input shim deployment".
 /// </remarks>
 public static class SteamInputShim
 {
     /// <summary>Export name the payload carries, used as proof of ownership.</summary>
     /// <remarks>
     /// Scanned for as raw bytes rather than parsed out of the PE export table: the
-    /// answer is the same, it needs no PE reader in a NativeAOT binary, and no
+    /// answer is the same, it avoids a full PE parser for one ownership marker, and no
     /// foreign controller DLL contains this string.
     /// </remarks>
     private const string OwnershipSignature = "WsgmSteamInputGateProxy";
@@ -522,7 +512,7 @@ public static class SteamInputShim
             }
             var signature = System.Text.Encoding.ASCII.GetBytes(OwnershipSignature);
             var content = File.ReadAllBytes(path);
-            return IndexOf(content, signature) >= 0;
+            return content.AsSpan().IndexOf(signature) >= 0;
         }
         catch
         {
@@ -530,33 +520,6 @@ public static class SteamInputShim
             // file alone rather than risk deleting somebody else's.
             return false;
         }
-    }
-
-    /// <summary>First index of <paramref name="needle"/> within <paramref name="haystack"/>.</summary>
-    private static int IndexOf(byte[] haystack, byte[] needle)
-    {
-        if (needle.Length == 0 || haystack.Length < needle.Length)
-        {
-            return -1;
-        }
-        var last = haystack.Length - needle.Length;
-        for (var start = 0; start <= last; start++)
-        {
-            var match = true;
-            for (var offset = 0; offset < needle.Length; offset++)
-            {
-                if (haystack[start + offset] != needle[offset])
-                {
-                    match = false;
-                    break;
-                }
-            }
-            if (match)
-            {
-                return start;
-            }
-        }
-        return -1;
     }
 
     /// <summary>Whether the deployed copy no longer matches the staged payload.</summary>

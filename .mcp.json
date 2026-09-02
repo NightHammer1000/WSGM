@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "steam-cef": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@1.8.0",
+        "--browserUrl",
+        "http://127.0.0.1:8080",
+        "--usageStatistics",
+        "false",
+        "--performanceCrux",
+        "false"
+      ]
+    }
+  }
+}

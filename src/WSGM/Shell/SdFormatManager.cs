@@ -19,25 +19,15 @@ namespace WSGM.Shell;
 ///
 /// The main input is a card straight out of a Steam Deck — GPT plus ext4, no
 /// Windows drive letter — so the whole job runs at DISK level through diskpart
-/// (clean → primary partition, then NTFS quick with 128K units, then the letter
-/// if automount did not already hand it out) rather than on a drive letter. 128K
-/// allocation units mirror the user's proven reference card; quick format only
-/// (a full format writes every sector of a wear-limited card for nothing). The
-/// steps are SEPARATE diskpart runs with a volume-arrival wait between the first
-/// two — see <see cref="BuildDiskpartFormatScript"/> for the device-observed
-/// reason.
+/// rather than on a drive letter. The mechanism is THREE separate diskpart runs
+/// with a volume-arrival wait, every run re-verified on fresh DISK handles
+/// first; the device evidence behind that shape is in <c>Shell\AGENTS.md</c>.
+/// 128K allocation units mirror the user's proven reference card; quick format
+/// only (a full format writes every sector of a wear-limited card for nothing).
 ///
 /// Enumeration is disk-level too (the eject list only sees mounted volumes) and
 /// runs off-thread on demand — no background polling. Rows reconcile in place
-/// (gamepad-cursor discipline). EVERY destructive diskpart run re-verifies the
-/// target on fresh handles first: same disk number, same size, same bus, still
-/// hot-pluggable, still not a system disk. One check up front is NOT enough —
-/// the pre-erase library removal can spend its whole CEF budget, the volume wait
-/// runs for up to 20 s, and each run is a fresh diskpart that resolves
-/// `select disk N` again. What no re-verification can see is a swap to a card of
-/// the SAME capacity in the same reader: the reader owns the device instance, the
-/// bus type and the hotplug flags, so capacity is the only discriminator left
-/// (see <see cref="CompareIdentity"/>).</summary>
+/// (gamepad-cursor discipline).</summary>
 public sealed class SdFormatManager : INotifyPropertyChanged
 {
     /// <summary>Raised after a status property changes.</summary>
@@ -186,27 +176,13 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         // Letters per disk, for the detail line (a letterless Deck card is the
         // normal case and simply shows none).
         var lettersByDisk = new Dictionary<int, List<char>>();
-        foreach (var drive in DriveInfo.GetDrives())
+        foreach (var volume in NativeStorage.MountedVolumes())
         {
-            try
+            if (volume.DeviceType == NativeStorage.FileDeviceDisk && volume.Disk >= 0)
             {
-                if (drive.DriveType is not (DriveType.Fixed or DriveType.Removable))
-                {
-                    continue;
-                }
-                var letter = char.ToUpperInvariant(drive.Name[0]);
-                using var volume = NativeStorage.OpenVolumeForQuery(letter);
-                if (!volume.IsInvalid
-                    && NativeStorage.TryGetDeviceNumber(volume, out var type, out var disk)
-                    && type == NativeStorage.FileDeviceDisk && disk >= 0)
-                {
-                    (lettersByDisk.TryGetValue(disk, out var list)
-                        ? list
-                        : lettersByDisk[disk] = []).Add(letter);
-                }
-            }
-            catch (IOException)
-            {
+                (lettersByDisk.TryGetValue(volume.Disk, out var list)
+                    ? list
+                    : lettersByDisk[volume.Disk] = []).Add(volume.Letter);
             }
         }
 
@@ -217,14 +193,13 @@ public sealed class SdFormatManager : INotifyPropertyChanged
             using var probe = NativeStorage.OpenVolumeForQueryPath(path);
             if (probe.IsInvalid
                 || !NativeStorage.TryGetDeviceNumber(probe, out _, out var disk)
-                || disk < 0 || !seenDisks.Add(disk) || systemDisks.Contains(disk))
+                || disk < 0 || !seenDisks.Add(disk)
+                || RemovableDriveManager.ClassifyDisk(disk, systemDisks) is null)
             {
                 continue;
             }
             using var handle = NativeStorage.OpenDiskForRead(disk);
-            if (handle.IsInvalid
-                || !NativeStorage.TryGetHotplugInfo(handle, out var media, out var hotplug)
-                || RemovableDriveManager.Classify(hotplug, media) is null)
+            if (handle.IsInvalid)
             {
                 continue;
             }
@@ -347,15 +322,9 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     /// <summary>The second diskpart script for one target: quick NTFS format with
     /// 128K allocation units (the proven game-library tuning).
     ///
-    /// This is a SEPARATE run from <see cref="BuildDiskpartPartitionScript"/> on
-    /// purpose. In one script, `format` right after `create partition primary`
-    /// only works when the volume manager has already surfaced the new
-    /// partition's volume — diskpart does not wait for it, and on the MSI Claw's
-    /// Realtek reader a 512 GB card consistently lost that race
-    /// (device-observed 2026-08-16: "no volume selected", exit E_INVALIDARG,
-    /// 1.9 s after start) while a 256 GB card in the same reader won it every
-    /// time. A fresh diskpart with `select partition 1` (which on a basic disk
-    /// also focuses the volume) after <see cref="WaitForVolume"/> sees the volume.
+    /// A SEPARATE run from <see cref="BuildDiskpartPartitionScript"/>, issued
+    /// only after <see cref="WaitForVolume"/> — the device-observed volume race
+    /// that forbids merging the scripts is recorded in <c>Shell\AGENTS.md</c>.
     ///
     /// The letter is deliberately NOT part of this script: by the time it runs,
     /// Windows automount has normally already given the new volume its letter,
@@ -390,14 +359,14 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     /// <summary>How long the format waits for the freshly created partition's
     /// volume to be surfaced by the volume manager before the format run is
     /// attempted anyway.</summary>
-    internal const int VolumeWaitMs = 20_000;
+    private const int VolumeWaitMs = 20_000;
 
     /// <summary>How many times the format run is attempted; each failure waits
     /// <see cref="FormatRetryDelayMs"/> before the next try.</summary>
-    internal const int FormatAttempts = 3;
+    private const int FormatAttempts = 3;
 
     /// <summary>The pause between format-run attempts.</summary>
-    internal const int FormatRetryDelayMs = 2_000;
+    private const int FormatRetryDelayMs = 2_000;
 
     /// <summary>Erases and formats one target and puts a Steam library on it.
     /// Serialized; progress lands in <see cref="StatusText"/>; the terminal
@@ -450,14 +419,16 @@ public sealed class SdFormatManager : INotifyPropertyChanged
             // A card reader reuses its drive letter. If this is a WSGM-formatted
             // card, first remove its existing Steam library by the marker's stable
             // content id; otherwise the live client keeps the old app list as
-            // ghost entries after diskpart has erased the manifests.
-            var retiredContentId = ReadExistingContentId(entry);
+            // ghost entries after diskpart has erased the manifests. The removal
+            // also reports the marker's id for the post-erase card retirement, so
+            // the marker is read once.
             var removal = await Task.Run(() => RemoveExistingLibrary(entry));
             if (removal.Failure is not null)
             {
                 Finish(removal.Failure, false);
                 return;
             }
+            var retiredContentId = removal.MarkerContentId;
             removedContentId = removal.RemovedContentId;
             removedLabel = removal.RemovedLabel;
 
@@ -469,9 +440,8 @@ public sealed class SdFormatManager : INotifyPropertyChanged
 
             var keepLetter = entry.PreferredLetter;
 
-            // Re-verify on fresh handles right before the only irreversible verb.
-            // VerifyTarget ran before RemoveExistingLibrary above, which can spend its
-            // whole CEF budget — long enough for a card to be swapped in the reader.
+            // Re-verify on fresh handles right before the only irreversible verb —
+            // the removal above can outlast a card swap (Shell\AGENTS.md).
             var beforeErase = await Task.Run(() => ReadTargetIdentity(entry));
             LogReverification(entry, beforeErase, ReverifiedStages[0]);
             if (beforeErase.Identity == TargetIdentity.Changed)
@@ -546,9 +516,8 @@ public sealed class SdFormatManager : INotifyPropertyChanged
                         + $"Output:\n{formatOutput}");
                     await Task.Delay(FormatRetryDelayMs);
                 }
-                // Each attempt is a FRESH diskpart that resolves `select disk N` again,
-                // and the volume wait before the loop can have run for 20 s: re-verify
-                // per attempt, or a card swapped in during the wait gets quick-formatted.
+                // Re-verify per attempt: each is a fresh diskpart resolving
+                // `select disk N` after waits long enough for a swap (Shell\AGENTS.md).
                 var beforeFormat = await Task.Run(() => ReadTargetIdentity(entry));
                 LogReverification(entry, beforeFormat, ReverifiedStages[1]);
                 if (beforeFormat.Identity == TargetIdentity.Changed)
@@ -586,9 +555,8 @@ public sealed class SdFormatManager : INotifyPropertyChanged
                     + " after the format; assigning "
                     + (keepLetter is >= 'A' and <= 'Z' ? $"{keepLetter}:." : "a letter."));
 
-                // Last re-verify: the assign run pins the OLD card's letter, so on a
-                // swapped card it would hand the new media the letter every emulator and
-                // library path on this machine points at. No compensation here either.
+                // Last re-verify before the assign pins the old card's letter onto
+                // whatever is in the reader (Shell\AGENTS.md). No compensation here either.
                 var beforeAssign = await Task.Run(() => ReadTargetIdentity(entry));
                 LogReverification(entry, beforeAssign, ReverifiedStages[2]);
                 if (beforeAssign.Identity == TargetIdentity.Changed)
@@ -660,32 +628,33 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Re-verifies the target on fresh handles immediately before the
-    /// destructive work: the disk number must still belong to a device with the
-    /// same size and bus, still hot-pluggable, still not a system disk. Returns
-    /// null when safe, else the refusal message.</summary>
+    /// <summary>Verifies the target on fresh handles before the run starts: the
+    /// disk number must still belong to a device with the same size and bus,
+    /// still hot-pluggable, still not a system disk. Returns null when safe, else
+    /// the refusal message. Deliberately STRICTER than the mid-run re-checks: at
+    /// this point nothing has been erased, so an unopenable or unreadable disk
+    /// aborts up front — the Unreadable-continues tolerance belongs only to the
+    /// re-verifications after `clean` (see <see cref="CompareIdentity"/>).</summary>
     private static string? VerifyTarget(FormatTargetEntry entry)
     {
-        if (RemovableDriveManager.ResolveSystemDisks().Contains(entry.DiskNumber))
+        var snapshot = ReadTargetIdentity(entry);
+        if (snapshot.SystemDisk)
         {
             return "This drive hosts Windows or WSGM and cannot be formatted.";
         }
-        using var handle = NativeStorage.OpenDiskForRead(entry.DiskNumber);
-        if (handle.IsInvalid)
+        if (!snapshot.HandleOpened)
         {
             return "The drive is no longer reachable. Reinsert it and try again.";
         }
-        if (!NativeStorage.TryGetHotplugInfo(handle, out var media, out var hotplug)
-            || RemovableDriveManager.Classify(hotplug, media) is null)
+        if (!snapshot.Removable)
         {
             return "The drive no longer reports as removable — not formatting it.";
         }
-        var size = NativeStorage.GetDiskLength(handle);
-        NativeStorage.TryGetDeviceDescriptor(handle, out var busType, out _);
-        if (size != entry.SizeBytes || busType != entry.BusType)
+        if (snapshot.SizeBytes != entry.SizeBytes || snapshot.BusType != entry.BusType)
         {
             Log.Warn($"Format: disk {entry.DiskNumber} changed identity "
-                + $"(size {entry.SizeBytes}->{size}, bus {entry.BusType}->{busType}).");
+                + $"(size {entry.SizeBytes}->{snapshot.SizeBytes}, "
+                + $"bus {entry.BusType}->{snapshot.BusType}).");
             return "The drive changed since it was listed — refresh and pick it again.";
         }
         return null;
@@ -709,18 +678,9 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     }
 
     /// <summary>Decides whether the disk behind the target's number is still the card
-    /// the user picked. Pure, so the ordering below is testable.
-    ///
-    /// A query FAILURE is never a mismatch. <see cref="NativeStorage.GetDiskLength"/>
-    /// returns 0 and <see cref="NativeStorage.TryGetDeviceDescriptor"/> reports -1
-    /// when the device does not answer, which is what a card reader looks like while
-    /// its media settles — aborting on those would break formats that succeed today.
-    /// Only a positively DIFFERENT identity aborts.
-    ///
-    /// A same-capacity card swapped into the same reader is indistinguishable here:
-    /// the reader — not the card — owns the device instance, the bus type and the
-    /// hotplug flags, so capacity is the only discriminator this can use. This
-    /// narrows the swap window; it does not close it.</summary>
+    /// the user picked. Pure, so the ordering below is testable. Identity predicates
+    /// only, a query failure is never a mismatch, and a same-capacity swap stays
+    /// invisible — the device evidence is in <c>Shell\AGENTS.md</c>.</summary>
     /// <param name="opened">The disk handle opened and answered its hotplug query.</param>
     /// <param name="systemDisk">The disk number now hosts Windows or WSGM.</param>
     /// <param name="removable">It still classifies as hot-pluggable/removable media.</param>
@@ -742,14 +702,9 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         {
             return TargetIdentity.Unreadable;
         }
-        // The sentinel tolerance is SYMMETRIC. `size == 0` and `busType == -1` are real
-        // query-failure values on BOTH sides: the baseline is captured at enumeration
-        // (see the FormatTargetEntry construction), where a reader that did not answer
-        // records the same sentinels and VerifyTarget still lets the run start. Guarding
-        // only the fresh read would turn a reader with an intermittent
-        // IOCTL_STORAGE_QUERY_PROPERTY into a mid-run abort — after `clean` has already
-        // erased the card — on a card that never moved. A fact we never had cannot
-        // contradict one we just read.
+        // The sentinel tolerance is SYMMETRIC: size 0 / bus -1 are query-failure
+        // values on BOTH sides (the enumeration baseline can carry them too), and
+        // a fact we never had cannot contradict one we just read (Shell\AGENTS.md).
         return !removable
             || (size > 0 && expectedSize > 0 && size != expectedSize)
             || (busType >= 0 && expectedBusType >= 0 && busType != expectedBusType)
@@ -763,15 +718,18 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     /// automated. Dropping a stage here fails <c>SdFormatTests</c>.</summary>
     internal static readonly string[] ReverifiedStages = ["clean/partition", "format", "assign"];
 
-    /// <summary>One re-verification pass: the verdict plus the raw facts behind it,
-    /// so an abort can name what differed in a pasted log.</summary>
+    /// <summary>One (re-)verification pass: the verdict plus the raw facts behind
+    /// it, so an abort can name what differed in a pasted log.</summary>
     /// <param name="Identity">The verdict.</param>
     /// <param name="SystemDisk">Whether the disk number now hosts Windows or WSGM.</param>
+    /// <param name="HandleOpened">Whether the disk handle opened at all — the
+    /// up-front check refuses on this where the mid-run checks tolerate it.</param>
     /// <param name="Removable">Whether it still reports as removable media.</param>
     /// <param name="SizeBytes">The size just read, 0 when the query failed.</param>
     /// <param name="BusType">The bus type just read, -1 when the query failed.</param>
     private readonly record struct TargetIdentitySnapshot(
-        TargetIdentity Identity, bool SystemDisk, bool Removable, long SizeBytes, int BusType);
+        TargetIdentity Identity, bool SystemDisk, bool HandleOpened, bool Removable,
+        long SizeBytes, int BusType);
 
     /// <summary>Re-reads the target's identity on FRESH handles immediately before one
     /// destructive diskpart run. Disk handle only — never a volume handle: an open
@@ -791,7 +749,8 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         var size = 0L;
         var busType = -1;
         using var handle = NativeStorage.OpenDiskForRead(entry.DiskNumber);
-        if (!handle.IsInvalid
+        var handleOpened = !handle.IsInvalid;
+        if (handleOpened
             && NativeStorage.TryGetHotplugInfo(handle, out var media, out var hotplug))
         {
             opened = true;
@@ -802,7 +761,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         return new TargetIdentitySnapshot(
             CompareIdentity(opened, systemDisk, removable, size, busType,
                 entry.SizeBytes, entry.BusType),
-            systemDisk, removable, size, busType);
+            systemDisk, handleOpened, removable, size, busType);
     }
 
     /// <summary>Logs one re-verification verdict. A mismatch is an abort reason and
@@ -840,14 +799,19 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     /// old library cannot safely be removed, and — only when a registration was
     /// ACTUALLY taken out of Steam — its identity and label, so the failure
     /// compensation restores exactly what it removed and never invents a
-    /// registration the user had deleted themselves.</summary>
+    /// registration the user had deleted themselves. The marker id rides along
+    /// so the post-erase retirement does not re-read the card's marker.</summary>
     /// <param name="Failure">The refusal message, or null when the run may proceed.</param>
     /// <param name="RemovedContentId">The removed registration's content id, or null.</param>
     /// <param name="RemovedLabel">The removed registration's label, empty when it had none.</param>
+    /// <param name="MarkerContentId">The content id the card's own marker carried,
+    /// whether or not Steam had it registered; null when no marker was found.</param>
     private readonly record struct LibraryRemoval(
-        string? Failure, string? RemovedContentId, string RemovedLabel)
+        string? Failure, string? RemovedContentId, string RemovedLabel,
+        string? MarkerContentId = null)
     {
-        internal static LibraryRemoval Nothing => new(null, null, "");
+        internal static LibraryRemoval Nothing(string? markerContentId = null) =>
+            new(null, null, "", markerContentId);
 
         internal static LibraryRemoval Refused(string message) => new(message, null, "");
     }
@@ -863,12 +827,12 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     {
         if (entry.PreferredLetter is < 'A' or > 'Z')
         {
-            return LibraryRemoval.Nothing;
+            return LibraryRemoval.Nothing();
         }
         var marker = FindExistingMarker(entry);
         if (marker is null)
         {
-            return LibraryRemoval.Nothing;
+            return LibraryRemoval.Nothing();
         }
         string contentId;
         try
@@ -891,20 +855,16 @@ public sealed class SdFormatManager : INotifyPropertyChanged
                 + "Close Steam and try again.");
         }
 
-        var steamExe = Steam.ExePath;
-        var configPath = steamExe is null
-            ? null : Path.Combine(Path.GetDirectoryName(steamExe)!, "config", "libraryfolders.vdf");
-        var configText = configPath is not null && File.Exists(configPath)
-            ? File.ReadAllText(configPath) : null;
-        if (steamExe is null)
+        if (!Steam.IsInstalled)
         {
             Log.Info("Format: Steam is not installed; no registration needs removal.");
-            return LibraryRemoval.Nothing;
+            return LibraryRemoval.Nothing(contentId);
         }
-        if (configPath is null || configText is null)
+        if (!Steam.TryReadLibraryFolders(out var configPath, out var configText)
+            || configPath is null || configText is null)
         {
             Log.Info($"Format: Steam has no libraryfolders config; {contentId} is not registered.");
-            return LibraryRemoval.Nothing;
+            return LibraryRemoval.Nothing(contentId);
         }
 
         // Identity gate — runs for BOTH the live and the closed-Steam path. Removal is
@@ -918,7 +878,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         {
             Log.Info($"Format: content id {contentId} is not registered with Steam; "
                 + "nothing to remove.");
-            return LibraryRemoval.Nothing;
+            return LibraryRemoval.Nothing(contentId);
         }
         var cardPath = FullPathOrNull(Path.GetDirectoryName(marker));
         var registeredFullPath = FullPathOrNull(registeredPath);
@@ -953,7 +913,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
             {
                 Log.Info($"Format: removed existing live Steam library (content id {contentId}, "
                     + $"status {result.Status}).");
-                return new LibraryRemoval(null, contentId, registeredLabel);
+                return new LibraryRemoval(null, contentId, registeredLabel, contentId);
             }
             Log.Warn($"Format: could not remove existing live library {contentId} "
                 + $"({result.Status}: {result.Detail ?? "no detail"}).");
@@ -968,7 +928,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
             || updated is null)
         {
             Log.Info($"Format: no closed-Steam registration found for content id {contentId}.");
-            return LibraryRemoval.Nothing;
+            return LibraryRemoval.Nothing(contentId);
         }
         if (Steam.IsRunning)
         {
@@ -979,7 +939,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         BackupOnce(configPath);
         WriteAtomically(configPath, updated);
         Log.Info($"Format: removed closed-Steam library registration for content id {contentId}.");
-        return new LibraryRemoval(null, contentId, registeredLabel);
+        return new LibraryRemoval(null, contentId, registeredLabel, contentId);
     }
 
     /// <summary>Normalizes a path for comparison, treating a malformed or empty one as
@@ -1002,29 +962,6 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         }
     }
 
-    private static string? ReadExistingContentId(FormatTargetEntry entry)
-    {
-        if (entry.PreferredLetter is < 'A' or > 'Z')
-        {
-            return null;
-        }
-        var marker = FindExistingMarker(entry);
-        if (marker is null)
-        {
-            return null;
-        }
-        try
-        {
-            return SteamLibraryVdf.ValuesOf(File.ReadAllText(marker), "contentid")
-                .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"Format: could not capture old card identity: {ex.Message}");
-            return null;
-        }
-    }
-
     /// <summary>The drive letters currently mounted on one physical disk, ascending.
     /// Read fresh instead of from the row's enumeration snapshot, and covering EVERY
     /// volume of a multi-partition disk: `clean` erases all of them, so a Steam
@@ -1034,25 +971,11 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     private static List<char> LettersOnDisk(int diskNumber)
     {
         var letters = new List<char>();
-        foreach (var drive in DriveInfo.GetDrives())
+        foreach (var volume in NativeStorage.MountedVolumes())
         {
-            try
+            if (volume.DeviceType == NativeStorage.FileDeviceDisk && volume.Disk == diskNumber)
             {
-                if (drive.DriveType is not (DriveType.Fixed or DriveType.Removable))
-                {
-                    continue;
-                }
-                var letter = char.ToUpperInvariant(drive.Name[0]);
-                using var volume = NativeStorage.OpenVolumeForQuery(letter);
-                if (!volume.IsInvalid
-                    && NativeStorage.TryGetDeviceNumber(volume, out var type, out var disk)
-                    && type == NativeStorage.FileDeviceDisk && disk == diskNumber)
-                {
-                    letters.Add(letter);
-                }
-            }
-            catch (IOException)
-            {
+                letters.Add(volume.Letter);
             }
         }
         letters.Sort();
@@ -1071,19 +994,14 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         var candidates = roots
             .Select(root => Path.Combine(root, "SteamLibrary", "libraryfolder.vdf"))
             .ToList();
-        var steamExe = Steam.ExePath;
-        if (steamExe is not null)
+        if (Steam.TryReadLibraryFolders(out _, out var configText) && configText is not null)
         {
-            var config = Path.Combine(Path.GetDirectoryName(steamExe)!, "config", "libraryfolders.vdf");
-            if (File.Exists(config))
+            foreach (var path in SteamLibraryVdf.ValuesOf(configText, "path"))
             {
-                foreach (var path in SteamLibraryVdf.ValuesOf(File.ReadAllText(config), "path"))
+                if (roots.Any(root => string.Equals(Path.GetPathRoot(path), root,
+                        StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (roots.Any(root => string.Equals(Path.GetPathRoot(path), root,
-                            StringComparison.OrdinalIgnoreCase)))
-                    {
-                        candidates.Add(Path.Combine(path, "libraryfolder.vdf"));
-                    }
+                    candidates.Add(Path.Combine(path, "libraryfolder.vdf"));
                 }
             }
         }
@@ -1110,6 +1028,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         if (string.IsNullOrEmpty(contentId)) { return; }
         var marker = FindExistingMarker(entry);
         if (marker is null) { return; }
+        var libraryPath = Path.GetDirectoryName(marker)!;
         // FindExistingMarker resolves by LOCATION (the letters currently on this disk
         // number), not by identity. The pre-erase abort above reaches this after
         // PROVING the media behind that disk number is a different card, so without
@@ -1121,9 +1040,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         {
             // The card can be gone by now — that is the scenario this guard exists for,
             // so an unreadable marker must refuse the restore rather than fault the run.
-            markerContentId = SteamLibraryVdf
-                .ValuesOf(File.ReadAllText(marker), "contentid")
-                .FirstOrDefault();
+            SteamLibraryVdf.TryReadMarkerContentId(libraryPath, out markerContentId);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1136,21 +1053,17 @@ public sealed class SdFormatManager : INotifyPropertyChanged
                     + $"{entry.DiskNumber} reports contentid {markerContentId ?? "(none)"}.");
             return;
         }
-        var libraryPath = Path.GetDirectoryName(marker)!;
         if (Steam.IsRunning)
         {
             var liveRestore = SteamCdp.AddLibrary(libraryPath, label);
             Log.Info($"Format: compensation after diskpart failure returned {liveRestore.Status}.");
             return;
         }
-        var steamExe = Steam.ExePath;
-        if (steamExe is null) { return; }
-        var configPath = Path.Combine(Path.GetDirectoryName(steamExe)!, "config", "libraryfolders.vdf");
-        if (!File.Exists(configPath))
+        if (!Steam.TryReadLibraryFolders(out var configPath, out var current)
+            || configPath is null || current is null)
         {
             return;
         }
-        var current = File.ReadAllText(configPath);
         if (!SteamLibraryVdf.IsContentIdRegistered(current, contentId)
             && SteamLibraryVdf.TrySplice(current, libraryPath, contentId, entry.SizeBytes,
                 out var restored, label) && restored is not null)
@@ -1272,7 +1185,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     /// <summary>How many 500 ms polls <see cref="WaitForLetter"/> spends when it
     /// is only checking whether automount already mounted the formatted volume,
     /// before diskpart is asked to assign the letter.</summary>
-    internal const int LetterProbeAttempts = 6;
+    private const int LetterProbeAttempts = 6;
 
     /// <summary>Polls for the freshly assigned drive letter by matching mounted
     /// volumes back to the disk number. Worker thread; ~15 s cap by default
@@ -1283,25 +1196,11 @@ public sealed class SdFormatManager : INotifyPropertyChanged
     {
         for (var attempt = 0; attempt < attempts; attempt++)
         {
-            foreach (var drive in DriveInfo.GetDrives())
+            foreach (var volume in NativeStorage.MountedVolumes())
             {
-                try
+                if (volume.Disk == diskNumber && volume.Ready)
                 {
-                    if (drive.DriveType is not (DriveType.Fixed or DriveType.Removable))
-                    {
-                        continue;
-                    }
-                    var letter = char.ToUpperInvariant(drive.Name[0]);
-                    using var volume = NativeStorage.OpenVolumeForQuery(letter);
-                    if (!volume.IsInvalid
-                        && NativeStorage.TryGetDeviceNumber(volume, out _, out var disk)
-                        && disk == diskNumber && drive.IsReady)
-                    {
-                        return letter;
-                    }
-                }
-                catch (IOException)
-                {
+                    return volume.Letter;
                 }
             }
             Thread.Sleep(500);
@@ -1321,14 +1220,10 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         Directory.CreateDirectory(Path.Combine(libraryPath, "steamapps"));
 
         var steamExe = Steam.ExePath;
-        var configPath = steamExe is null
-            ? null
-            : Path.Combine(Path.GetDirectoryName(steamExe)!, "config", "libraryfolders.vdf");
+        Steam.TryReadLibraryFolders(out var configPath, out var configText);
         var taken = new HashSet<string>(StringComparer.Ordinal);
-        string? configText = null;
-        if (configPath is not null && File.Exists(configPath))
+        if (configText is not null)
         {
-            configText = File.ReadAllText(configPath);
             foreach (var id in SteamLibraryVdf.ValuesOf(configText, "contentid"))
             {
                 taken.Add(id);
@@ -1487,12 +1382,7 @@ public sealed class SdFormatManager : INotifyPropertyChanged
         }
 
         var steamExe = Steam.ExePath;
-        var configPath = steamExe is null
-            ? null
-            : Path.Combine(Path.GetDirectoryName(steamExe)!, "config", "libraryfolders.vdf");
-        var configText = configPath is not null && File.Exists(configPath)
-            ? File.ReadAllText(configPath)
-            : null;
+        Steam.TryReadLibraryFolders(out var configPath, out var configText);
 
         // An existing library keeps its identity; only a fresh folder gets a
         // marker (and Steam's client dll) written.

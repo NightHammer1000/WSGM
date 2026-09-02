@@ -1,7 +1,11 @@
-﻿using Avalonia;
+using System;
+using System.Collections.Generic;
+using Avalonia;
 using Avalonia.Controls.Metadata;
 using Avalonia.Controls.Primitives;
 using Avalonia.Styling;
+
+#pragma warning disable CS1591, IDE0011, IDE0055 // Vendored public API and formatting.
 
 namespace LoadingIndicators.Avalonia;
 
@@ -85,3 +89,5 @@ public class LoadingIndicator : TemplatedControl
         PseudoClasses.Add(IsActive ? ACTIVE_STATE : INACTIVE_STATE);
     }
 }
+
+#pragma warning restore CS1591, IDE0011, IDE0055

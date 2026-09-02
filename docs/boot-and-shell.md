@@ -6,29 +6,30 @@ real hardware or against a live Steam client, and changing it without re-verifyi
 waiting to happen.
 
 **Process modes** (`Program.DecideMode`): `--shell` / `--boot` (service-launched takeover) /
-`--settings` / `--overlay-test`; the legacy auto mode (shell iff registered as shell and no desktop
-alive) survives only for the migration window — new installs never register as shell, so no-args =
-settings. Shell mode: single-instance mutex `Local\WSGM.Shell` (held only in shell mode — the
-installer keys off it), crash-loop breaker (3 shell starts in 2 min → **disarm the service boot**:
-boot.json `GameModeBoot=false` + config flag off + legacy shell unregister + explorer if none),
-`Panic()` = legacy shell unregister (self-guarding no-op on service installs), destroy tray host,
-start explorer if none is running. The logon service's watchdog is the robust outer recovery layer;
-Panic is in-process best effort.
+`--settings` / `--overlay-test`; WSGM never registers as the Windows shell, so no-args = settings.
+Shell mode: single-instance mutex `Local\WSGM.Shell` (held only in shell mode — the installer keys
+off it), crash-loop breaker (3 shell starts in 2 min → **disarm the service boot**: boot.json
+`GameModeBoot=false` + config flag off + shell-snapshot restore + explorer if none), `Panic()` =
+shell-snapshot restore (self-guarding no-op), destroy tray host, delegate recovery to the verified
+shell anchor when one exists, otherwise start explorer if none is running. The logon service's
+watchdog is the robust outer recovery layer; Panic is in-process best effort.
 
 **Logon service + boot flow** (`src\WSGM.LogonService`, `Core\BootManifest.cs`,
 `Core\BootManifestWriter.cs`, `Shell\ExplorerReadiness.cs`): the SYSTEM service (raw SCM +
-`SERVICE_ACCEPT_SESSIONCHANGE`, NativeAOT, no ServiceBase) reacts to `WTS_SESSION_LOGON` only (not
-console connect — fast-user-switch keeps what runs), reads the per-user
-`%LOCALAPPDATA%\WSGM\boot.json` **boot manifest** (projected from config.json by WSGM on `--setup`,
-settings saves, and every shell start; the service treats it as untrusted and only ever launches the
-named exe AS THAT USER), and launches `WSGM.exe --boot` via `CreateProcessAsUserW` — with the user's
-elevated **linked token** when the manifest says so (legal under the service's SeTcbPrivilege; no
-UAC prompt at logon). A startup catch-up sweep covers autologons that beat the auto-start service
-(fresh = logged on < 60 s). The service watchdog holds the launched pid: dirty exit + active
-session + no explorer → start explorer with the UNLINKED token (explorer must stay unelevated), once
-per logon, never relaunching WSGM. Service log: `%ProgramData%\WSGM\wsgm-service.log` (SYSTEM must
-not write user dirs); WSGM's own `Run mode: Shell (service boot, elevated=…, session N)` line keeps
-wsgm.log the primary surface.
+`SERVICE_ACCEPT_SESSIONCHANGE`, no ServiceBase) reacts to `WTS_SESSION_LOGON` only (not console
+connect — fast-user-switch keeps what runs), reads the per-user `%LOCALAPPDATA%\WSGM\boot.json`
+**boot manifest** (projected from config.json by WSGM on `--setup`, settings saves, and every shell
+start; the service treats it as untrusted and only ever launches the named exe AS THAT USER), and
+launches `WSGM.exe --boot` via `CreateProcessAsUserW` — with the user's elevated **linked token**
+when the manifest says so (legal under the service's SeTcbPrivilege; no UAC prompt at logon). A
+startup catch-up sweep covers autologons that beat the auto-start service (fresh = logged on < 60
+s). The service watchdog holds the launched pid: dirty exit + active session + no explorer → allow
+the session-owned shell anchor five seconds to restore its normal medium/jobless Explorer, then
+start explorer with the UNLINKED token only if no shell appeared (explorer must stay unelevated),
+once per logon, never relaunching WSGM. This bounded grace prevents the anchor and SYSTEM watchdog
+from creating competing shells; the watchdog remains the outer fallback when the anchor is absent or
+broken. Service log: `%ProgramData%\WSGM\wsgm-service.log` (SYSTEM must not write user dirs); WSGM's
+own `Run mode: Shell (service boot, elevated=…, session N)` line keeps wsgm.log the primary surface.
 
 **The service fires BEFORE Winlogon starts explorer** (device-verified 2026-08-07), so `--boot` runs
 the takeover unconditionally — never gate it on `IsRunningInSession()` at start (that exact gate
@@ -69,6 +70,80 @@ requires 500 ms of stable absence. Two mechanisms are device-DISPROVEN (2026-08-
 explorer ~30 s, error 351, then respawn). The full working-era implementation is preserved in the
 Codex transcript `~\.codex\sessions\2026\08\06\rollout-2026-08-06T23-57-41-*.jsonl` (L567/L1167).
 
+**How Explorer is restored for a normal desktop transition:** immediately before each orderly exit,
+WSGM resolves the actual `Shell_TrayWnd` owner and accepts it only when `GetShellWindow` has the
+same owner, its image is the canonical `%WINDIR%\explorer.exe`, it belongs to the current session,
+runs at medium integrity, and is not associated with a job. WSGM retains that process as the
+designated `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` and starts one fixed-purpose medium/jobless WSGM
+anchor under it before the old shell exits. The anchor accepts only an authenticated per-session
+`start` command for the fixed Windows Explorer path. WSGM owns the exact child handle, bounds every
+pipe operation, stops only that owned process on failed setup, and disposes/replaces the anchor with
+the shell session. Capture, restore, replacement, and disposal are serialized inside that session
+owner; disposal closes admission before waiting for an already-running operation. A named
+per-session stop event lets a new run identify and retire only a stale WSGM anchor. Command-pipe EOF
+alone is not owner loss: the anchor keeps the recovery role until the retained owner process
+actually exits or that explicit stop event is signalled. A faulted asynchronous owner wait is
+likewise not a recovery settlement; the anchor keeps serving its authenticated pipe, retries an
+exact-process liveness observation, and otherwise waits for explicit stop instead of abandoning the
+session or starting Explorer beside an owner it could not classify.
+
+**Does the retained handle stay a valid designated parent after that process exits?** The API
+documentation does not say, so it was measured. On Windows 11 25H2 build 26200.9168 (2026-08-29),
+with a throwaway `cmd.exe` standing in for Explorer so nothing about the real shell was disturbed:
+with the designated parent already exited and only its handle retained, the handle stays signalled,
+`GetExitCodeProcess` still answers, `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
+succeeds, and the child's **recorded parent is the dead process**, not the caller. Reproduced across
+three runs, each with a live-parent control proving the harness itself works.
+
+That settles creation and reparenting. It does **not** settle the half the mechanism depends on:
+whether a dead parent still supplies the medium token and the job association, or only the recorded
+parent pid. Discriminating those needs a parent at a different integrity level from the caller,
+which needs an elevated run. Until that is answered the anchor stays the normal path — so a
+`CreateProcessW` that merely succeeds is not evidence the token came from where it was supposed to.
+
+The transition completes only after `GetShellWindow` and `Shell_TrayWnd` have the same resulting
+owner for a stable 500 ms and that owner again passes image/session/integrity/job inspection. The
+PID returned by process creation is diagnostic only; it is never the success condition. An
+already-valid shell is adopted (the early splash-cancellation case). A canonical current-session
+medium Explorer with unknown or positive job membership is usable only as a degraded desktop. A
+wrong-image, wrong-session, elevated, uninspectable, owner-mismatched, or unsettled taskbar is
+failure, not degraded success. If an anchor request was dispatched or may have crossed the pipe,
+WSGM never dispatches the scheduler as a second creator and never recreates `TrayHost` while that
+late shell may still publish `Shell_TrayWnd`.
+
+The scheduled-task de-elevation route is retained solely as last-resort fail-open recovery when no
+anchor request was dispatched. Its result is always reported as degraded even if the observed
+Explorer happens to be jobless. Its task XML write and `schtasks` create/run/delete commands consume
+the same absolute desktop-restoration deadline as readiness observation; cancellation or a process
+wait fault stops the active tool, and cleanup is skipped once that shared budget is closed instead
+of acquiring a fresh timeout. An uncertain `/Create` is still cleanup-eligible while budget remains.
+A timed-out or faulted `/Run` command is an unknown dispatch, never proof that no launch occurred,
+so WSGM keeps its tray retired while a late Explorer may still appear. An older-build job-bound
+taskbar is never ended without a verified repair owner: takeover stays in desktop mode and the UI
+gives the explicit sign-out/reboot-once instruction. On abnormal WSGM loss the anchor waits briefly
+for another recovery actor, preserves any existing shell surface, checks that the session is still
+active, and only then restores Explorer. The installed anchor is the same application payload under
+the distinct `WSGM.ShellAnchor.exe` image name. Restart Manager excludes that image, so installer
+force fallback can stop the primary `WSGM.exe` first, wait for the companion's bounded
+recovery-settled acknowledgement, and retire only the companion image in the installer's Terminal
+Services session after its preserve/restore decision while holding that session-local event name
+against a new anchor. A missing acknowledgement defers companion replacement rather than killing the
+only remaining desktop-recovery owner; silent setup keeps the old companion for a later maintenance
+pass instead of converting that deferral into an automatic reboot. Before explicitly retiring the
+anchor, normal disposal verifies or restores a usable desktop; logoff retires it without launching.
+Application shutdown rejects new mode and Steam-launch commands and waits for the one in-flight
+transition and boot worker under the process's single outer deadline. Device cleanup runs before
+that wait, and the anchor remains alive if the deadline or desktop verification fails so owner-loss
+recovery still has a jobless Explorer launch path. Logs record source and result PID, both
+shell-surface owners, route, session, integrity, job state, readiness, elapsed time,
+fallback/dispatched state, and independent Win32 query errors.
+
+**Residual device acceptance:** the anchor path and refusal/fallback classifications are covered by
+isolated policy tests and build verification, but the affected-device matrix remains attended:
+before/after-exit splash cancellation, repeated transitions, abnormal-loss recovery, Process
+Explorer job inspection, and the Mod Organizer 2 breakaway launch must still be exercised on the
+reference Claw. Unattended tests must not start or stop the live shell.
+
 **Shell session** (`Shell\ShellSession`): launches startup apps (optional `StartupDelayMs` wait
 before the first one — the "First app delay" setting — then staggered, optionally elevated), then
 Steam Big Picture. WSGM self-elevates when a startup app or Steam requires matching integrity, and
@@ -77,22 +152,39 @@ state must live on controllers, not in `_config`, because reloads replace it who
 `Shell\SteamMonitor` polls `steam;steamwebhelper` every 5 s; its `Paused` flag is how desktop mode
 and "Close Steam" suppress auto-relaunch/overlay-pop reactions.
 
+The resident shell also owns a shared `WTSRegisterSessionNotification` lease. `WTS_SESSION_LOGOFF`
+requests the five-second session-end shutdown path before Avalonia exits; display-mute owns a
+separate lease for unlock recovery, so toggling that optional feature cannot deregister the shell's
+logoff signal. Update and uninstall use distinct cross-version events and deadlines. Update asks
+Steam and launch wrappers to exit under one bounded ten-second pre-stop before the separate
+ten-second WSGM cleanup because the mapped input payload must be replaceable. The installer reserves
+both windows plus handoff margin before force-stop; a failed Steam pre-stop still starts WSGM
+cleanup. Setup records the initial shell/settings classification once; a post-shutdown refusal,
+retry, or cancellation before file mutation releases its device reservations and restores the old
+service through its installer-tagged start plus that exact runtime mode instead of classifying the
+temporary stopped state. Uninstall allows twenty seconds for WSGM cleanup and does not force-close
+Steam. It holds the same global package/owner reservations through `[UninstallDelete]`; cancellation
+before uninstall mutation restores the service and prior runtime.
+
 **Steam integration** (`Core\Steam.cs`, `Core\SteamInputBlocker.cs`, `Shell\SessionModes.cs`,
 `Overlay\OverlayController.cs`): everything is protocol URLs — start/focus =
 `steam://open/bigpicture` (boots Steam if needed, UIPI-proof), leave BP =
 `steam://close/bigpicture`, quit = `steam://exit`. Desktop mode = pause monitor + close BP + start
-explorer (de-elevated if WSGM is elevated — `Core\UnelevatedLauncher.cs` via scheduled task). A
-runtime desktop-to-game switch requests Big Picture FIRST while keeping the monitor paused, then
-runs `ExplorerControl.ExitExplorerAndWait` off the UI thread. That overlaps Steam's UI startup with
-Explorer's bounded linger/retry instead of presenting the safety wait before Big Picture appears.
-Only after Explorer is verifiably gone does the UI thread apply game posture, recreate game-mode
-services/the tray host, and resume monitoring. If Explorer refuses to exit, the transition sends
-`steam://close/bigpicture` and preserves desktop mode. The direct logon boot remains stricter: Steam
-starts only after Explorer is gone. `SessionModes.TransitionInProgress` serializes transitions (the
-overlay ignores mode clicks while one runs). The game/desktop mode transitions and the shared Steam
-start+warning flow live in `Shell\SessionModes` (session coordinator, used by both `ShellSession`
-boot and the overlay's buttons); `OverlayController` stays the UI owner (lease lifecycle, overlay
-window) and surfaces `SessionModes.SteamStartFailed` warnings.
+Explorer through the verified session anchor above; `Core\UnelevatedLauncher.cs` via scheduled task
+is recovery-only and is surfaced as degraded. A runtime desktop-to-game switch requests Big Picture
+FIRST while keeping the monitor paused, then runs `ExplorerControl.ExitExplorerAndWait` off the UI
+thread. That overlaps Steam's UI startup with Explorer's bounded linger/retry instead of presenting
+the safety wait before Big Picture appears. Only after Explorer is verifiably gone does the UI
+thread apply game posture, recreate game-mode services/the tray host, and resume monitoring. If
+Explorer refuses to exit, the transition sends `steam://close/bigpicture` and preserves desktop
+mode. Conversely, if desktop restoration fails before any Explorer launch was dispatched, rollback
+reopens Big Picture before recreating game-mode services; a dispatched/late shell suppresses that
+recreation to prevent dual taskbars. The direct logon boot remains stricter: Steam starts only after
+Explorer is gone. `SessionModes.TransitionInProgress` serializes transitions (the overlay ignores
+mode clicks while one runs). The game/desktop mode transitions and the shared Steam start+warning
+flow live in `Shell\SessionModes` (session coordinator, used by both `ShellSession` boot and the
+overlay's buttons); `OverlayController` stays the UI owner (lease lifecycle, overlay window) and
+surfaces `SessionModes.SteamStartFailed` warnings.
 
 **The strongest current evidence for the recurring Steam startup hang is boot-context CEF mutation,
 not the resident input shim** (device-observed repeatedly 2026-08-22). WSGM's direct-boot Steam
@@ -105,6 +197,43 @@ now require the process-owned Big Picture window, while card detection starts im
 only the live Steam change. Device re-verification of that boundary is still required. Keep the
 per-process trace (`%LOCALAPPDATA%\WSGM\steam-input-gate-<pid>.log`) as the control for future
 reports; do not resume proxy-timing changes unless a failing trace differs.
+
+**The 2.0 patch host reproduced the same hang from the other side (device-observed 2026-09-01).**
+The persistent transport reconnects to Steam's port on a 1/4/16/30 s backoff and
+`SteamUiSessionHost` synchronizes every registered patch on the first `GenerationChanged`, so that
+path never went through `SteamUiReadiness`; `7ddda25` then folded the last explicit boot gate (the
+download sort) into it. On a desktop-to-game transition that cold-started Steam (PID 6500,
+19:14:22.028) the log shows `wsgm.download-sort v1: Applied` and a running-application probe at
+19:14:24.979, then the native-QAM bootstrap and eighteen patches Applied/Verified by 19:14:26 — and
+no Big Picture window, ever; `steam://exit` did nothing and Task Manager was needed. The only
+successful cold boot in that log (2026-08-31 15:53) connected 80 ms AFTER
+`Big Picture window detected`. The fix sits at the choke point rather than per consumer:
+`ShellSession` owns a one-second loop that keeps the transport's enabled flag equal to
+`SteamUiReadiness.TransportShouldBeOpen(cefMaster, inGameMode, bigPictureVisible)`, re-checked on
+every mode change and Steam lifecycle edge and always under the master-switch gate, so no discovery,
+connection or evaluation can reach a cold-starting Steam. Desktop mode stays open on the master
+switch alone. What a healthy game-mode cold start looks like in `wsgm.log`:
+`Steam UI transport closed: game mode without a Big Picture window …`, then
+`Big Picture window detected`, then `Steam UI transport open: Big Picture window is up.`, and only
+after that the first `Steam UI patch … Applying`. A patch line before the window line is the
+regression. Attended re-verification of this gate on the Claw is still outstanding.
+
+**The gate alone was not enough: state already injected hangs the rebuild too (device-diagnosed over
+CDP, 2026-09-01).** A desktop-to-game transition fires `steam://open/bigpicture` against a
+SharedJSContext that desktop mode had already patched — the transport there opens on the master
+switch alone. Steam then rebuilds its front-end in place (same `CLIENT_SESSION`): the gamepad UI
+bootstrap found WSGM's `SteamClient.System.*` namespaces, took the Deck code path, and its calls
+went unanswered when the mode flip closed the transport two seconds after the request. Live state of
+the hang: `GetDesiredSteamUIWindows()` records the wanted gamepad window native-side, `uiMode` stays
+7, `g_PopupManager` holds no popups, `Audio.GetDevices()` pends and then rejects on the bridge's 5 s
+timeout — and no window is ever created. The transitions therefore retract first: `SessionModes`
+awaits `ShellSession.PrepareSteamUiForBigPictureAsync` (bounded to 5 s) before ANY
+`RequestBigPictureWhilePausedAsync`, which retracts the injected UI through the still-open transport
+and closes the choke point (`TransportShouldBeOpen` carries the pending flag), so Steam's rebuild
+sees stock Windows client state — the one bootstrap Valve ships here. The hold lifts when the
+transition settles on any path; the window then reopens the gate and every patch re-applies through
+it. `Steam UI transport closed: Big Picture was requested …` before
+`Started protocol: steam://open/bigpicture` is the healthy transition shape in `wsgm.log`.
 
 7. **Big Picture's UI (steamwebhelper/CEF) suspends rendering while fully occluded** — a BP intro
    video that initializes under an opaque fullscreen cover stays black even after the cover leaves
@@ -125,62 +254,31 @@ reports; do not resume proxy-timing changes unless a failing trace differs.
    general rule: on any poll that feeds splash dismissal or takeover progress, a swallowed exception
    is the lesser failure. Prefer a throttled one-shot warning over a narrower catch.
 
-**Taskbar + tray host** (`Overlay\TaskbarWindow/TaskbarViewModel`, `Core\TrayProtocol.cs`,
-`Shell\TrayHost.cs`, `Shell\SystemStatus.cs`): bottom-edge swipe in game mode opens a **full-width
-three-zone bar** — left WSGM button (opens quick access through the existing handover), centre the
-switchable windows (`WindowFinder.ListSwitchableWindows`) in a horizontally scrolling strip, right
-the tray icons (also bounded/scrolling) plus Wi-Fi/Bluetooth buttons, battery and clock from
-`SystemStatus`. Columns are `Auto,*,Auto` ON PURPOSE: the old `*,Auto,*` let a large tile count push
-the home button and the whole status cluster off a 1280-wide screen. Tiles keep FIXED sizes at every
-count. The buttons open the `RadioManager`-backed radio panel; they must never invoke `ms-settings:`
-(the immersive shell cannot activate it without Explorer in the session). The right edge stays quick
-access, and `OverlayController` owns BOTH surfaces (shared Steam Input lease released only when both
-are closed, mutual exclusion with restore-target handover, same 150 ms deferred close and
-ghost-click WndProc hook). Tile refreshes reconcile IN PLACE — a wholesale rebuild would destroy the
-focused button under the gamepad cursor. `TrayHost` registers a window class literally named
-`Shell_TrayWnd` (that's how `Shell_NotifyIcon` finds a tray; game mode has no explorer, so without
-it closed-to-tray apps lose their icons) and parses the WM_COPYDATA wire format in the pure,
-unit-tested `TrayProtocol` (32-bit handle fields on every architecture). Two hard rules: (a) **never
-coexist with explorer's taskbar** — the host is destroyed on `SessionModes.DesktopModeStarting`
-(before `StartExplorer`) and recreated on `GameModeEntered`; (b) the **UIPI gate**: WSGM is usually
-elevated, and unelevated apps' `Shell_NotifyIcon` WM_COPYDATA is silently dropped by UIPI unless
-`ChangeWindowMessageFilterEx(WM_COPYDATA, MSGFLT_ALLOW)` is applied to the tray window — no shipped
-replacement shell runs elevated, so this gate is WSGM-specific and its device verification status
-must be tracked via the `Tray host created (… WM_COPYDATA filter …)` / `Tray icon Added/Rejected`
-log lines.
+**Open apps strip + tray host** (`Overlay\OverlayWindow/AppSwitcherViewModel`,
+`Core\TrayProtocol.cs`, `Shell\TrayHost.cs`, `Shell\SystemStatus.cs`): the former bottom taskbar
+lives inside the quick access sheet — the switchable windows (`WindowFinder.ListSwitchableWindows`)
+as a horizontally scrolling chip strip along the sheet's bottom, the tray icons (bounded/scrolling,
+budgeted by `OverlayWindow.ComputeTrayMaxWidth` so they can never push the fixed pills off a
+1280-wide screen) plus the Wi-Fi/Bluetooth/audio/eject pills, battery and clock from `SystemStatus`
+in the sheet's header. Chips and pills keep FIXED sizes at every count. The pills open the
+`RadioManager`-backed radio panel; they must never invoke `ms-settings:` (the immersive shell cannot
+activate it without Explorer in the session). Chip refreshes reconcile IN PLACE — a wholesale
+rebuild would destroy the focused button under the gamepad cursor. `TrayHost` registers a window
+class literally named `Shell_TrayWnd` (that's how `Shell_NotifyIcon` finds a tray; game mode has no
+explorer, so without it closed-to-tray apps lose their icons) and parses the WM_COPYDATA wire format
+in the pure, unit-tested `TrayProtocol` (32-bit handle fields on every architecture). Two hard
+rules: (a) **never coexist with explorer's taskbar** — the host is destroyed on
+`SessionModes.DesktopModeStarting` (before `StartExplorer`) and recreated on `GameModeEntered`; (b)
+the **UIPI gate**: WSGM is usually elevated, and unelevated apps' `Shell_NotifyIcon` WM_COPYDATA is
+silently dropped by UIPI unless `ChangeWindowMessageFilterEx(WM_COPYDATA, MSGFLT_ALLOW)` is applied
+to the tray window — no shipped replacement shell runs elevated, so this gate is WSGM-specific and
+its device verification status must be tracked via the `Tray host created (… WM_COPYDATA filter …)`
+/ `Tray icon Added/Rejected` log lines.
 
-A third rule guards the OUTBOUND side: (c) **a registered callback message is relayed only when it
-lies in `WM_USER..0xFFFF`** — `TrayProtocol.IsRelayableCallback`, enforced in `TrayHost.SendClick`
-immediately after the existing "registered no callback message" drop and before the `IsWindow`
-check. The tray wire is attacker-reachable by design: the UIPI allowance in (b) exists precisely so
-a Medium-IL process can push WM_COPYDATA into WSGM's High-IL `Shell_TrayWnd`, the sender's callback
-HWND is taken verbatim off that wire, and the relay itself (`SendNotifyMessageW`) travels outbound
-from High IL, where UIPI restricts nothing. Without the bound a Medium-IL process could register an
-icon naming an ELEVATED window with `uCallbackMessage` = `WM_CLOSE` or `WM_SYSCOMMAND` and have the
-tray deliver it on the next click. Three parts of the shape are deliberate:
-
-- **The filter is on the message, never on the target's integrity level.** WSGM itself launches
-  Handheld Companion / RTSS / MSI Afterburner elevated (`Core\KnownStartupApps.cs`), and `TrayHost`
-  documents WinForms-hosted tray menus as device-verified consumers — an IL-based filter would kill
-  tray clicks for exactly the apps the handheld depends on.
-- **Registration is untouched.** `TrayProtocol.TryParse`, `TrayIconTable.Apply` and the WM_COPYDATA
-  return value are byte-identical; a rejected NIM_ADD reads to shell32 as failure and well-behaved
-  apps then re-add in a loop. An icon with a non-relayable callback still registers, still renders,
-  and still shows its tooltip — only its click is dropped, and the drop is logged ONCE per tray host
-  (a per-click `Log.Warn` would push the boot/takeover/lease lines out of the capped log, which is
-  the same rule that keeps tray logging to Added/Removed).
-- **The lower bound is `WM_USER` (0x0400), not `WM_APP`.** WinForms `NotifyIcon` registers WM_USER +
-  1024 and Qt's `QSystemTrayIcon` uses WM_APP + 101; a tighter bound would silently break real
-  applications.
-
-Two honest caveats belong with this, because the guard is a mitigation and not a fix. First, **no
-supported Win32 API identifies the sender of a WM_COPYDATA**, so WSGM cannot authenticate the
-registering process at all — bounding the message value is the whole of the defence. The related
-reading that WM_COPYDATA's `wParam` (which WSGM's WndProc ignores; it forwards only `lParam`) would
-carry the same untrusted handle anyway comes from ReactOS/Wine sources, NOT from anything verified
-against live shell32 — treat it as informed inference, not as established behaviour. Second, the
-residual is NOT closed: an attacker who registers an icon can still make WSGM deliver ANY message in
-`WM_USER..0xFFFF` to any window it names, including the `RegisterWindowMessage` range 0xC000..0xFFFF
-that real applications use for private IPC, and on a version-0/3 icon the accompanying `wParam` is
-the wire `uid` — a fully attacker-chosen 32-bit value. The values stay bounded (`Notify` composes
-them), so there is no pointer primitive, but a targeted private-IPC message remains reachable.
+A third rule guards the outbound side: (c) **relay only application-defined callback messages in
+`WM_USER..0xFFFF`**. `TrayProtocol.IsRelayableCallback` applies that range in `TrayHost.SendClick`;
+system messages such as `WM_CLOSE` are never forwarded. The check is on the message rather than the
+target integrity level because supported elevated tray applications still need clicks. Registration
+remains successful for an out-of-range callback so shell32 does not enter an add/reject loop; only
+activation is dropped and logged once per tray-host lifetime. `WM_USER` is the lower bound because
+WinForms uses `WM_USER + 1024`, while Qt uses an even higher `WM_APP` value.

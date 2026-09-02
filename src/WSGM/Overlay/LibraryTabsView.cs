@@ -334,7 +334,6 @@ public sealed class LibraryTabsView : OverlaySubView
         {
             var index = _config.CustomTabs.IndexOf(_editingOriginal);
             _editing.Position = _editingOriginal.Position;
-            _editing.CollectionId = _editingOriginal.CollectionId;
             if (index >= 0)
             {
                 _config.CustomTabs[index] = _editing;
@@ -973,7 +972,6 @@ public sealed class LibraryTabsView : OverlaySubView
         Enabled = t.Enabled,
         Position = t.Position,
         Categories = t.Categories,
-        CollectionId = t.CollectionId,
         FilterTree = t.FilterTree?.Clone() ?? new FilterNode { Kind = FilterKind.Merge },
     };
 }

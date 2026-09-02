@@ -80,8 +80,8 @@ public sealed unsafe class TouchSwipeMonitor : IDisposable
     private byte[] _inputBuffer = new byte[256];
     private bool _bottomEnabled;
     private bool _rightEnabled;
-    private bool _leftSteamMenuEnabled;
-    private bool _topSteamQuickAccessEnabled;
+    private bool _leftEnabled;
+    private bool _topEnabled;
     private int _bandPx = MinimumBandPx;
     private bool _armed = true;
     private bool _contactWasDown;
@@ -157,14 +157,17 @@ public sealed unsafe class TouchSwipeMonitor : IDisposable
     public void Configure(GestureConfig gestures)
     {
         _bottomEnabled = gestures.BottomEdge;
-        _rightEnabled = gestures.RightEdge;
-        _leftSteamMenuEnabled = gestures.LeftEdgeSteamMenu;
-        _topSteamQuickAccessEnabled = gestures.TopEdgeSteamQuickAccess;
+        _rightEnabled = gestures.RightEdgeSteamQuickAccess;
+        _leftEnabled = gestures.LeftEdgeSteamMenu;
+        _topEnabled = gestures.TopEdge;
         _bandPx = Math.Max(MinimumBandPx, gestures.StripThickness);
         _tracking = false;
-        Log.Info(
-            $"Touch edge swipes configured (bottom={_bottomEnabled}, right={_rightEnabled}, " +
-            $"left-steam={_leftSteamMenuEnabled}, top-qam={_topSteamQuickAccessEnabled}, band={_bandPx}px).");
+        // Re-applied on every config reload, which the shell does often, so this restated an
+        // unchanged gesture set 1,162 times in one session.
+        Log.Change(
+            "touch.edges",
+            $"Touch edge swipes configured (bottom={_bottomEnabled}, top={_topEnabled}, " +
+            $"left-steam={_leftEnabled}, right-qam={_rightEnabled}, band={_bandPx}px).");
     }
 
     /// <summary>Resume gesture detection (overlay closed).</summary>
@@ -556,8 +559,8 @@ public sealed unsafe class TouchSwipeMonitor : IDisposable
 
         _bottomCandidate = _bottomEnabled && y >= _screenH - _bandPx;
         _rightCandidate = _rightEnabled && x >= _screenW - _bandPx;
-        _leftCandidate = _leftSteamMenuEnabled && x < _bandPx;
-        _topCandidate = _topSteamQuickAccessEnabled && y < _bandPx;
+        _leftCandidate = _leftEnabled && x < _bandPx;
+        _topCandidate = _topEnabled && y < _bandPx;
         if (!_bottomCandidate && !_rightCandidate && !_leftCandidate && !_topCandidate)
         {
             return;

@@ -1,0 +1,89 @@
+diff --git a/device/steamdeck/device.go b/device/steamdeck/device.go
+index 1e9575b..c449022 100644
+--- a/device/steamdeck/device.go
++++ b/device/steamdeck/device.go
+@@ -23,10 +23,6 @@ const (
+ 	genericEndpointNumber    = 0x01
+ )
+ 
+-var zeroMouseReport = []byte{0x00, 0x00, 0x00, 0x00}
+-
+-var zeroKeyboardReport = []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+-
+ type SteamDeck struct {
+ 	gate           *device.InputGate
+ 	inputState          *InputState
+@@ -148,16 +144,11 @@ func (d *SteamDeck) UpdateInputState(state *InputState) {
+ func (d *SteamDeck) HandleTransfer(ctx context.Context, ep uint32, dir uint32, out []byte) []byte {
+ 	if dir == usbip.DirIn {
+ 		switch ep {
+-		case mouseEndpointNumber:
+-			if device.GateCancelled == device.BlockUntilDeadline(ctx) {
+-				return nil
+-			}
+-			return append([]byte(nil), zeroMouseReport...)
+-		case keyboardEndpointNumber:
+-			if device.GateCancelled == device.BlockUntilDeadline(ctx) {
+-				return nil
+-			}
+-			return append([]byte(nil), zeroKeyboardReport...)
++		case mouseEndpointNumber, keyboardEndpointNumber:
++			// These interfaces are descriptor placeholders only. Keep the host request
++			// pending instead of completing it with idle input that can wake the system.
++			device.BlockUntilDeadline(ctx)
++			return nil
+ 		case controllerEndpointNumber:
+ 			if device.GateCancelled == d.gate.Wait(ctx) {
+ 				return nil
+diff --git a/device/steamdeck/inputstate.go b/device/steamdeck/inputstate.go
+index 2519aba..819a2e3 100644
+--- a/device/steamdeck/inputstate.go
++++ b/device/steamdeck/inputstate.go
+@@ -133,6 +133,17 @@ func (s *InputState) UnmarshalBinary(data []byte) error {
+ 	return nil
+ }
+ 
++// clampStickMin keeps stick Y values out of math.MinInt16. SDL3's deck driver
++// negates stick Y with plain unary minus (SDL_hidapi_steamdeck.c: -sLeftStickY),
++// so -32768 wraps back to -32768 and a fully deflected stick reads as the
++// opposite extreme. Real deck sticks are calibrated and never report -32768.
++func clampStickMin(v int16) int16 {
++	if v == -32768 {
++		return -32767
++	}
++	return v
++}
++
+ func (s *InputState) buildReport(frame uint32, payloadLen byte) []byte {
+ 	b := make([]byte, InputReportLen)
+ 	b[0] = 0x01
+@@ -256,9 +267,9 @@ func (s *InputState) buildReport(frame uint32, payloadLen byte) []byte {
+ 	binary.LittleEndian.PutUint16(b[44:46], s.LTrigger)
+ 	binary.LittleEndian.PutUint16(b[46:48], s.RTrigger)
+ 	binary.LittleEndian.PutUint16(b[48:50], uint16(s.LStickX))
+-	binary.LittleEndian.PutUint16(b[50:52], uint16(s.LStickY))
++	binary.LittleEndian.PutUint16(b[50:52], uint16(clampStickMin(s.LStickY)))
+ 	binary.LittleEndian.PutUint16(b[52:54], uint16(s.RStickX))
+-	binary.LittleEndian.PutUint16(b[54:56], uint16(s.RStickY))
++	binary.LittleEndian.PutUint16(b[54:56], uint16(clampStickMin(s.RStickY)))
+ 	binary.LittleEndian.PutUint16(b[56:58], s.LPadForce)
+ 	binary.LittleEndian.PutUint16(b[58:60], s.RPadForce)
+ 	binary.LittleEndian.PutUint16(b[60:62], s.LStickForce)
+diff --git a/device/steamdeck/steamdeck_test.go b/device/steamdeck/steamdeck_test.go
+index f95eedd..655b666 100644
+--- a/device/steamdeck/steamdeck_test.go
++++ b/device/steamdeck/steamdeck_test.go
+@@ -37,7 +37,12 @@ func TestInputReports(t *testing.T) {
+ 				assert.Equal(t, byte(steamdeck.InputReportID), got[2])
+ 				assert.Equal(t, byte(steamdeck.DeckInputPayloadLen), got[3])
+ 				assert.Equal(t, make([]byte, 7), got[8:15])
+-				assert.Equal(t, uint16(0x4000), binary.LittleEndian.Uint16(got[36:38]))
++				// The orientation quaternion stays zero when unset. 9de6355 dropped the
++				// forced identity deliberately: the device does not advertise
++				// SendOrientation and never computes a live orientation, and a frozen
++				// identity quat made Steam ignore the raw angular velocity and collapse
++				// gyro-to-stick to center. Matches InputPlumber's Steam Deck target.
++				assert.Equal(t, uint16(0), binary.LittleEndian.Uint16(got[36:38]))
+ 				assert.Equal(t, uint16(0), binary.LittleEndian.Uint16(got[38:40]))
+ 				assert.Equal(t, uint16(0), binary.LittleEndian.Uint16(got[40:42]))
+ 				assert.Equal(t, uint16(0), binary.LittleEndian.Uint16(got[42:44]))

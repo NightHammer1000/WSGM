@@ -41,10 +41,11 @@
                               Grid.Column="2"
                               OnContent=""
                               OffContent=""
+                              AutomationProperties.Name="Radio power"
                               IsCheckedChanged="OnRadioSwitchToggled" />
             </Grid>
 
-            <c:TabStrip x:Name="Tabs" Grid.Row="1" ShowBumperHints="True" />
+            <c:TabStrip x:Name="Tabs" Grid.Row="1" />
 
             <!-- Named so the code-behind can scroll a controller-focused row
                  into view: directional Focus() does not raise
@@ -89,8 +90,7 @@
                                                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                                         <TextBlock Text="{Binding Ssid}" />
                                                         <TextBlock Text="{Binding StatusLine}"
-                                                                   Classes="caption"
-                                                                   IsVisible="{Binding HasStatusLine}" />
+                                                                   Classes="caption" />
                                                     </StackPanel>
                                                 </Grid>
                                             </Button>
@@ -144,8 +144,7 @@
                                                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                                         <TextBlock Text="{Binding Name}" />
                                                         <TextBlock Text="{Binding StatusLine}"
-                                                                   Classes="caption"
-                                                                   IsVisible="{Binding HasStatusLine}" />
+                                                                   Classes="caption" />
                                                     </StackPanel>
                                                 </Grid>
                                             </Button>

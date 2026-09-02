@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace WSGM.Core;
 
@@ -25,6 +27,14 @@ public static class Log
     private const string RotationMutexName = @"Local\WSGM.LogRotate";
     private const int RotationMutexTimeoutMs = 1000;
     private static long _bytesSinceRotationCheck;
+
+    // Last state written for each Change() key, with the number of identical polls suppressed
+    // since. Most keys are compile-time constants, but some are per-subject (one window's tray
+    // rejections, say), so this is capped: past the limit the whole map is dropped and the next
+    // poll of each key writes one line again. Losing suppression is the correct failure — a
+    // diagnostic must never be the thing that grows without bound.
+    private const int MaxChangeKeys = 512;
+    private static readonly Dictionary<string, (string Message, long Repeats)> LastByKey = [];
 
     /// <summary>Gets the per-user directory used for logs, configuration, and installed files.</summary>
     public static string Directory =>
@@ -70,17 +80,79 @@ public static class Log
     /// <param name="ex">The exception to record.</param>
     public static void Error(string message, Exception ex) => Write("error", $"{message}: {ex}");
 
+    /// <summary>Observes a detached operation and records any non-cancellation failure.</summary>
+    /// <param name="task">Operation whose exception must be observed.</param>
+    /// <param name="operation">Diagnostic name of the operation.</param>
+    internal static void Observe(Task task, string operation) => _ = ObserveAsync(task, operation);
+
+    private static async Task ObserveAsync(Task task, string operation)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Warn($"{operation} failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Records a polled state under a key, writing only when it differs from what that key last
+    /// recorded.
+    /// </summary>
+    /// <param name="key">Stable identity of the thing being observed, e.g. "steam.cef".</param>
+    /// <param name="message">The current state, written verbatim when it changed.</param>
+    /// <param name="level">Log level for the line; "info " by default.</param>
+    /// <remarks>
+    /// Poll loops are the reason the log stops being readable. One session measured 43,392 lines of
+    /// which 22,000 were five messages a timer kept re-stating — "Steam CEF: nothing is listening on
+    /// port 8080" alone appeared 8,044 times — and the overlay work being diagnosed that day was
+    /// buried under it. Every repeat after the first says only "still", which the timestamps already
+    /// imply.
+    /// <para>
+    /// Suppressed repeats are counted, not discarded: the next line that does change carries
+    /// "(previous state held for N more polls)", so the log still shows that the poll kept running
+    /// and for how long. A silent drop would be worse than the spam, because it turns a stalled
+    /// timer and a steady state into the same log.
+    /// </para>
+    /// </remarks>
+    public static void Change(string key, string message, string level = "info ")
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(message);
+
+        // Held for the Write as well: Monitor is reentrant, and releasing between the decision and
+        // the append would let another thread's line land between them.
+        lock (Gate)
+        {
+            if (LastByKey.TryGetValue(key, out (string Message, long Repeats) previous)
+                && string.Equals(previous.Message, message, StringComparison.Ordinal))
+            {
+                LastByKey[key] = (previous.Message, previous.Repeats + 1);
+                return;
+            }
+
+            long held = previous.Repeats;
+            if (LastByKey.Count >= MaxChangeKeys)
+            {
+                LastByKey.Clear();
+            }
+
+            LastByKey[key] = (message, 0);
+            Write(level, held > 0
+                ? $"{message} (previous state held for {held} more polls)"
+                : message);
+        }
+    }
+
     /// <summary>Moves the live log aside when it passes <see cref="MaxLogBytes"/>,
-    /// keeping one previous file. Best-effort: a held-open file just leaves rotation
-    /// for the next attempt, so appends keep working either way. Callers serialize
-    /// this through <see cref="Gate"/>, or run it before logging starts (Init).
-    ///
-    /// The shell, Settings and the elevated one-shots all append to the same file, so
-    /// <see cref="Gate"/> alone is not enough: two processes that both saw an oversized
-    /// file used to delete each other's archive (the second Delete removed the copy the
-    /// first had just moved into place), destroying up to 5 MB of the primary remote
-    /// diagnosis surface. A named mutex plus a re-check inside it makes the loser see
-    /// the already-rotated small file and do nothing.</summary>
+    /// keeping one previous file. Rotation is best effort so an open file never blocks
+    /// later appends. A named mutex and an in-lock size check serialize the shell,
+    /// Settings and elevated processes that share the log.</summary>
     private static void RotateIfLarge()
     {
         var path = _path;

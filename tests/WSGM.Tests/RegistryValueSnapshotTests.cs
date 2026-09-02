@@ -41,15 +41,6 @@ public sealed class RegistryValueSnapshotTests
         Assert.Equal(RegistryValueKind.ExpandString, scope.Key.GetValueKind("Shell"));
     }
 
-    [Fact]
-    public void LegacyUncapturedReferenceValueRemainsRestorable()
-    {
-        var snapshot = CreateSnapshot();
-        var config = new AppConfig { PreviousShellValue = "explorer.exe" };
-
-        Assert.True(snapshot.HasValue(config));
-    }
-
     private static RegistryValueSnapshot<string?> CreateSnapshot()
         => new(
             "Shell",

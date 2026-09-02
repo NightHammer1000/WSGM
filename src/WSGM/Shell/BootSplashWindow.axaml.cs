@@ -163,7 +163,9 @@ public partial class BootSplashWindow : Window
         // touch raw events handled, so WM_POINTER falls to DefWindowProc, which
         // promotes a tap into a delayed synthesized mouse click. Eat those here so
         // a splash tap can never land on whatever the splash was covering.
-        Win32Properties.AddWndProcHookCallback(this, WndProcHook);
+        Win32Properties.AddWndProcHookCallback(
+            this,
+            Interop.NativeMethods.SwallowTouchSynthesizedMouse);
 
         if (_preview)
         {
@@ -172,21 +174,6 @@ public partial class BootSplashWindow : Window
         }
     }
 
-    private static IntPtr WndProcHook(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, ref bool handled)
-    {
-        if (msg is Interop.NativeMethods.WmMouseMove
-                or Interop.NativeMethods.WmLButtonDown
-                or Interop.NativeMethods.WmLButtonUp)
-        {
-            var extra = (uint)Interop.NativeMethods.GetMessageExtraInfo();
-            if ((extra & Interop.NativeMethods.MiWpSignatureMask) == Interop.NativeMethods.MiWpSignature)
-            {
-                handled = true;
-                return IntPtr.Zero;
-            }
-        }
-        return IntPtr.Zero;
-    }
 
     private void OnPreviewKeyDown(object? sender, KeyEventArgs e)
     {

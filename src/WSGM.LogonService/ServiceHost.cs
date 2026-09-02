@@ -5,9 +5,8 @@ using WSGM.LogonService.Interop;
 
 namespace WSGM.LogonService;
 
-/// <summary>Raw-SCM service host (ServiceBase is not in the AOT-blessed set and the
-/// surface is three functions). The control handler only ever enqueues work — SCM
-/// handlers must return fast.</summary>
+/// <summary>Hosts the service directly on the small SCM API surface.</summary>
+/// <remarks>The control handler only enqueues work because SCM handlers must return quickly.</remarks>
 internal static class ServiceHost
 {
     internal const string ServiceName = "WSGMLogonService";

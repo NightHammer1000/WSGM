@@ -13,7 +13,7 @@
             <ResourceDictionary.MergedDictionaries>
                 <!-- Boot-splash spinner styles. Merged BEFORE Palette.axaml so
                      the Hc* tokens stay authoritative on any key collision. -->
-                <ResourceInclude Source="avares://LoadingIndicators.Avalonia/LoadingIndicators.axaml" />
+                <ResourceInclude Source="avares://WSGM/ThirdParty/LoadingIndicators/LoadingIndicators.axaml" />
                 <ResourceInclude Source="/Themes/Palette.axaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
@@ -21,9 +21,11 @@
 
     <Application.Styles>
         <fa:FluentAvaloniaTheme />
+        <!-- Theme for the ColorSpectrum the device color editor embeds; FluentAvalonia does not
+             carry Avalonia's ColorPicker control themes. -->
+        <StyleInclude Source="avares://Avalonia.Controls.ColorPicker/Themes/Fluent/Fluent.xaml" />
         <StyleInclude Source="/Themes/Typography.axaml" />
         <StyleInclude Source="/Themes/Shared.axaml" />
-        <StyleInclude Source="/Themes/ControlThemes.axaml" />
         <StyleInclude Source="/Themes/TabStripTheme.axaml" />
         <StyleInclude Source="/Themes/CardButtonTheme.axaml" />
     </Application.Styles>

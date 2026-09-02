@@ -70,7 +70,7 @@ public static class SteamLaunchConfig
             "args:d.strShortcutLaunchOptions||'',dir:d.strShortcutStartDir||''});}" +
             "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
 
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable || result.Value is null)
         {
@@ -176,7 +176,7 @@ public static class SteamLaunchConfig
                 "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
         }
 
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         return Interpret(result, "Applied. Launch the game from Steam as usual.");
     }
@@ -213,7 +213,7 @@ public static class SteamLaunchConfig
                 SettleJs + "return JSON.stringify({ok:true});}" +
                 "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
         }
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         return Interpret(result, "Applied. Launch the game from Steam as usual.");
     }
@@ -257,7 +257,7 @@ public static class SteamLaunchConfig
                 "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
         }
 
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         return Interpret(result, "Removed. The game launches the way it did before.");
     }

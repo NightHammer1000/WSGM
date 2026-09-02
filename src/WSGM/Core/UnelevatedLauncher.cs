@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace WSGM.Core;
 
@@ -17,49 +19,201 @@ internal static class UnelevatedLauncher
 {
     public static bool TryStartViaScheduledTask(string exePath, string arguments = "")
     {
-        // Unique per invocation: a fixed name collides across concurrent launches,
-        // and a stale leftover task would shadow the fresh one.
-        var suffix = $"{Environment.ProcessId}-{Random.Shared.Next():x8}";
-        var taskName = $"WSGM_StartUnelevated_{suffix}";
-        // NOT %TEMP%: the XML is consumed by an elevated schtasks, and a fixed,
-        // predictable, user-writable path could be swapped between the write and
-        // /Create. Log.Directory plus the random name closes the easy version.
-        var xmlPath = Path.Combine(Log.Directory, $"wsgm-task-{suffix}.xml");
-        var created = false;
+        // Recovery and legacy synchronous callers share the exact bounded implementation used by
+        // the asynchronous desktop handoff. ConfigureAwait(false) throughout keeps this fixed sync
+        // boundary independent of a UI synchronization context.
+        ScheduledTaskLaunchDisposition disposition = TryStartViaScheduledTaskAsync(
+            exePath,
+            arguments,
+            DateTimeOffset.UtcNow.AddSeconds(30),
+            CancellationToken.None).GetAwaiter().GetResult();
+        return disposition is ScheduledTaskLaunchDisposition.Dispatched;
+    }
+
+    /// <summary>Runs the scheduled-task handoff within a caller-owned absolute deadline. Task
+    /// creation, dispatch, and best-effort deletion all consume the same remaining budget.</summary>
+    internal static async Task<ScheduledTaskLaunchDisposition> TryStartViaScheduledTaskAsync(
+        string exePath,
+        string arguments,
+        DateTimeOffset deadline,
+        CancellationToken cancellationToken)
+    {
+        string suffix = $"{Environment.ProcessId}-{Random.Shared.Next():x8}";
+        string taskName = $"WSGM_StartUnelevated_{suffix}";
+        string xmlPath = Path.Combine(Log.Directory, $"wsgm-task-{suffix}.xml");
         try
         {
-            Directory.CreateDirectory(Log.Directory);
-            // Task Scheduler expects canonical UTF-16 task XML; a UTF-8 file is
-            // rejected with "cannot switch encoding" (verified locally).
-            File.WriteAllText(xmlPath, BuildTaskXml(exePath, arguments), System.Text.Encoding.Unicode);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!HasRemainingBudget(deadline))
+            {
+                Log.Warn("De-elevated scheduled-task launch was not started because its shared deadline expired.");
+                return ScheduledTaskLaunchDisposition.NotDispatched;
+            }
 
-            created = RunSchtasks($"/Create /TN \"{taskName}\" /XML \"{xmlPath}\" /F");
-            if (!created)
+            Directory.CreateDirectory(Log.Directory);
+            string taskXml = BuildTaskXml(exePath, arguments);
+            using (var writeCancellation = CreateBudgetCancellation(deadline, cancellationToken))
             {
-                return false;
+                await File.WriteAllTextAsync(
+                    xmlPath,
+                    taskXml,
+                    System.Text.Encoding.Unicode,
+                    writeCancellation.Token).ConfigureAwait(false);
             }
-            var started = RunSchtasks($"/Run /TN \"{taskName}\"");
-            if (started)
+
+            ScheduledTaskLaunchDisposition disposition = await RunScheduledTaskSequenceAsync(
+                taskName,
+                xmlPath,
+                deadline,
+                cancellationToken,
+                RunSchtasksUntilAsync).ConfigureAwait(false);
+            if (disposition is ScheduledTaskLaunchDisposition.Dispatched)
             {
-                Log.Info($"Started via de-elevating scheduled task: {exePath}" +
-                         (arguments.Length == 0 ? "" : $" {arguments}"));
+                Log.Info($"Started via de-elevating scheduled task: {exePath}"
+                    + (arguments.Length == 0 ? "" : $" {arguments}"));
             }
-            return started;
+            return disposition;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            Log.Warn("De-elevated scheduled-task launch did not finish before its shared deadline.");
+            return ScheduledTaskLaunchDisposition.NotDispatched;
         }
         catch (Exception ex)
         {
             Log.Error("De-elevated launch via scheduled task failed", ex);
-            return false;
+            return ScheduledTaskLaunchDisposition.NotDispatched;
         }
         finally
         {
-            // Best-effort cleanup on EVERY path (including /Run failures/throws) so
-            // a one-shot task never stays registered.
-            if (created)
+            // Local deletion does not consume the Task Scheduler budget. Always remove the input
+            // document even when dispatch was cancelled or timed out; otherwise every bounded
+            // recovery failure leaves another XML file in the durable log directory.
+            try
             {
-                try { RunSchtasks($"/Delete /TN \"{taskName}\" /F"); } catch { }
+                File.Delete(xmlPath);
             }
-            try { File.Delete(xmlPath); } catch { }
+            catch (Exception ex)
+            {
+                Log.Warn($"Scheduled-task XML cleanup failed: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>Runs create, dispatch, and cleanup commands through an injected runner so their
+    /// shared-deadline contract can be verified without invoking Task Scheduler.</summary>
+    internal static Task<ScheduledTaskLaunchDisposition> RunScheduledTaskSequenceAsync(
+        string taskName,
+        string xmlPath,
+        DateTimeOffset deadline,
+        CancellationToken cancellationToken,
+        Func<string, DateTimeOffset, CancellationToken, Task<ConsoleToolRunOutcome>> runCommand) =>
+        RunScheduledTaskSequenceAsync(
+            taskName,
+            xmlPath,
+            deadline,
+            cancellationToken,
+            runCommand,
+            static () => DateTimeOffset.UtcNow);
+
+    /// <summary>Runs the scheduled-task sequence through an injected clock so deadline closure can
+    /// be verified deterministically without invoking Task Scheduler.</summary>
+    internal static async Task<ScheduledTaskLaunchDisposition> RunScheduledTaskSequenceAsync(
+        string taskName,
+        string xmlPath,
+        DateTimeOffset deadline,
+        CancellationToken cancellationToken,
+        Func<string, DateTimeOffset, CancellationToken, Task<ConsoleToolRunOutcome>> runCommand,
+        Func<DateTimeOffset> utcNow)
+    {
+        ArgumentNullException.ThrowIfNull(runCommand);
+        ArgumentNullException.ThrowIfNull(utcNow);
+        bool taskMayExist = false;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!HasRemainingBudget(deadline, utcNow))
+            {
+                return ScheduledTaskLaunchDisposition.NotDispatched;
+            }
+
+            ConsoleToolRunOutcome create = await runCommand(
+                $"/Create /TN \"{taskName}\" /XML \"{xmlPath}\" /F",
+                deadline,
+                cancellationToken).ConfigureAwait(false);
+            taskMayExist = create is ConsoleToolRunOutcome.Succeeded
+                or ConsoleToolRunOutcome.Unknown;
+            if (create is not ConsoleToolRunOutcome.Succeeded)
+            {
+                return ScheduledTaskLaunchDisposition.NotDispatched;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!HasRemainingBudget(deadline, utcNow))
+            {
+                return ScheduledTaskLaunchDisposition.NotDispatched;
+            }
+
+            try
+            {
+                ConsoleToolRunOutcome run = await runCommand(
+                    $"/Run /TN \"{taskName}\"",
+                    deadline,
+                    cancellationToken).ConfigureAwait(false);
+                return run switch
+                {
+                    ConsoleToolRunOutcome.Succeeded => ScheduledTaskLaunchDisposition.Dispatched,
+                    ConsoleToolRunOutcome.Unknown => ScheduledTaskLaunchDisposition.Unknown,
+                    _ => ScheduledTaskLaunchDisposition.NotDispatched,
+                };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Once /Run begins, an exception cannot prove Task Scheduler rejected the
+                // request. The caller must suppress every competing shell launch surface.
+                Log.Warn($"Scheduled-task dispatch result is unknown for {taskName}: {ex.Message}");
+                return ScheduledTaskLaunchDisposition.Unknown;
+            }
+        }
+        finally
+        {
+            if (taskMayExist)
+            {
+                if (cancellationToken.IsCancellationRequested || !HasRemainingBudget(deadline, utcNow))
+                {
+                    Log.Warn($"Scheduled-task cleanup skipped for {taskName}: the shared budget is closed.");
+                }
+                else
+                {
+                    try
+                    {
+                        ConsoleToolRunOutcome deleted = await runCommand(
+                            $"/Delete /TN \"{taskName}\" /F",
+                            deadline,
+                            cancellationToken).ConfigureAwait(false);
+                        if (deleted is not ConsoleToolRunOutcome.Succeeded)
+                        {
+                            Log.Warn($"Scheduled-task cleanup failed for {taskName}.");
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warn($"Scheduled-task cleanup failed for {taskName}: {ex.Message}");
+                    }
+                }
+            }
         }
     }
 
@@ -97,5 +251,43 @@ internal static class UnelevatedLauncher
             """;
     }
 
-    private static bool RunSchtasks(string arguments) => ConsoleTool.Run(ConsoleTool.System32("schtasks.exe"), arguments);
+    private static Task<ConsoleToolRunOutcome> RunSchtasksUntilAsync(
+        string arguments,
+        DateTimeOffset deadline,
+        CancellationToken cancellationToken) =>
+        ConsoleTool.RunUntilAsync(
+            ConsoleTool.System32("schtasks.exe"),
+            arguments,
+            deadline,
+            cancellationToken);
+
+    private static CancellationTokenSource CreateBudgetCancellation(
+        DateTimeOffset deadline,
+        CancellationToken cancellationToken)
+    {
+        var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        TimeSpan remaining = deadline - DateTimeOffset.UtcNow;
+        source.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
+        return source;
+    }
+
+    private static bool HasRemainingBudget(DateTimeOffset deadline) =>
+        deadline > DateTimeOffset.UtcNow;
+
+    private static bool HasRemainingBudget(
+        DateTimeOffset deadline,
+        Func<DateTimeOffset> utcNow) =>
+        deadline > utcNow();
+}
+
+/// <summary>Whether the scheduled recovery request definitely stayed local, definitely reached
+/// Task Scheduler, or may have crossed the dispatch boundary.</summary>
+internal enum ScheduledTaskLaunchDisposition
+{
+    /// <summary>No Explorer launch request reached Task Scheduler.</summary>
+    NotDispatched,
+    /// <summary>Task Scheduler accepted the Explorer launch request.</summary>
+    Dispatched,
+    /// <summary>The scheduler command began but its dispatch result could not be verified.</summary>
+    Unknown,
 }

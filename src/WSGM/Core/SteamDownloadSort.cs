@@ -1,4 +1,3 @@
-using System;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -7,117 +6,28 @@ namespace WSGM.Core;
 
 /// <summary>Adds Name / Size / Type sort buttons to the header of Big Picture's
 /// download queue ("Up Next"), reordering the queue through Steam's own
-/// <c>SteamClient.Downloads.SetQueueIndex</c>.
-///
-/// <para>The buttons are built from Steam's own <c>Focusable</c> component and are
-/// injected as real React children, so they join Steam's gamepad navigation
-/// (device-verified: the controller reaches them and the footer shows the
-/// select hint). A plain DOM injection was tried first and rejected — it renders,
-/// but raw DOM nodes are invisible to Steam's focus tree.</para>
-///
-/// <para><b>Why the injection point is the JSX runtime.</b> Two closer points were
-/// tried against live Steam and do not work: the section header component rebuilds
-/// its own <c>children</c> array after spreading rest props, so it can only be
-/// wrapped, never filled; and the download-list section is a MobX observer whose
-/// <c>render</c> is a NON-configurable, NON-writable own property on every instance,
-/// so it cannot be patched, deleted, or shadowed by a prototype accessor. Wrapping
-/// <c>jsx</c>/<c>jsxs</c> and intercepting the header element at creation is what is
-/// left. The hot-path cost is one reference comparison per created element.</para>
-///
-/// <para>Everything is located by shape, never by webpack module id: React by
-/// <c>createElement</c>+<c>useMemo</c>+<c>version</c>, <c>Focusable</c> by a source
-/// destructuring <c>flow-children</c>/<c>onActivate</c>, and the queued section by the
-/// locale-independent <c>#Downloads_Section_Current</c> title token. Webpack's ES
-/// exports are ACCESSOR properties, so the scans must read through getters — a
-/// value-only scan finds neither React nor Focusable.</para>
-///
-/// <para>Accepted fragility, same class as the injected library tabs: the title token
-/// and the JSX runtime's export names are what a major Steam UI update could move.
-/// <see cref="DisableAsync"/> and a Steam restart both fully recover.</para></summary>
-public static class SteamDownloadSort
+/// <c>SteamClient.Downloads.SetQueueIndex</c>. The device-verified findings this
+/// script rests on — the <c>Focusable</c> requirement, the JSX-runtime injection
+/// point, the tight component predicates, the whole-pending-list scope and the
+/// unknown-size ranking — are in <c>docs\steam-cef.md</c> §12; re-probe with
+/// <c>tools/WsgmLibTest/run-prod-sort.mjs</c> before shipping a change here.</summary>
+internal static class SteamDownloadSort
 {
-    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(12);
+    internal static string InstallExpression =>
+        "(()=>{try{" + ResidentSetup
+        + "return W.dlSortInstall();}"
+        + "catch(e){return JSON.stringify({ok:false,err:String((e&&e.stack)||e)});}})()";
 
-    /// <summary>Installs the resident sort-button script (idempotent). Safe to call
-    /// before the user has ever opened the Downloads page: the patch applies on that
-    /// page's next render.</summary>
-    /// <param name="cancellationToken">Cancels the exchange.</param>
-    /// <returns>True when the script reported itself installed.</returns>
-    /// <remarks>Sorting covers the whole queue including the item currently being
-    /// downloaded; a paused queue is never resumed by a sort.</remarks>
-    public static async Task<bool> EnableAsync(CancellationToken cancellationToken = default)
-    {
-        var expression =
-            "(()=>{try{" + ResidentSetup +
-            "return W.dlSortInstall();}" +
-            "catch(e){return JSON.stringify({ok:false,err:String((e&&e.stack)||e)});}})()";
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
-            .ConfigureAwait(false);
-        if (!result.Reachable || result.Value is null)
-        {
-            return false;
-        }
-        try
-        {
-            using var document = JsonDocument.Parse(result.Value);
-            var root = document.RootElement;
-            if (root.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True)
-            {
-                Log.Info("Download queue sort injected.");
-                return true;
-            }
-            var err = root.TryGetProperty("err", out var e) ? e.GetString() : null;
-            Log.Warn($"Download queue sort injection failed: {err}.");
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"Download queue sort parse failed: {ex.Message}");
-        }
-        return false;
-    }
-
-    /// <summary>Unwraps the patched JSX runtime and re-renders, removing the buttons
-    /// from the live Steam session. Best-effort; a Steam restart also recovers.</summary>
-    /// <param name="cancellationToken">Cancels the exchange.</param>
-    public static Task<CefEvalResult> DisableAsync(CancellationToken cancellationToken = default)
-        => SteamCef.EvaluateAsync(
-            "(()=>{try{var W=window.__wsgm;if(W&&W.dlSortRemove)W.dlSortRemove();"
-            + "return JSON.stringify({ok:true});}"
-            + "catch(e){return JSON.stringify({ok:false,err:String(e)});}})()",
-            Budget, cancellationToken);
+    internal const string RemoveExpression =
+        "(()=>{try{var W=window.__wsgm;if(W&&W.dlSortRemove)W.dlSortRemove();"
+        + "return JSON.stringify({ok:true});}"
+        + "catch(e){return JSON.stringify({ok:false,err:String(e)});}})()";
 
     // The resident script. Guarded by dlSortVer so re-running only refreshes the
     // functions — bump BOTH literals below ("W.dlSortVer!==1" and "W.dlSortVer=1")
     // whenever this text changes, or a live Steam session keeps running the OLD
     // functions until the client restarts (same rule as the badge and Wi-Fi scripts).
-    //
-    // Shape notes, all verified against live Steam:
-    //   * The WHOLE queue is sorted, index 0 included: the item Steam is currently
-    //     working on is part of the queue, so excluding it made a sort look wrong.
-    //     Moving a different app to index 0 just switches which one Steam works on —
-    //     per-app progress is kept, so nothing is thrown away.
-    //   * The displayed size is the sum of progress[k_EAppUpdateProgress_Download]
-    //     .bytes_total across every content type (content + workshop + shader) —
-    //     Steam's own formula. Taking the max over the progress array instead yields
-    //     numbers that do not match what the rows show.
-    //   * buildid 0 means nothing is installed yet -> Install; otherwise Update.
-    //   * SetQueueIndex(appid, index, remoteClientId) is Steam's own signature.
-    //     EnableAllDownloads is never called here, but a sort still RESUMES a paused
-    //     queue (live-verified: paused -> Downloading, even when the order does not
-    //     actually change) because Steam reacts to a SetQueueIndex at the head. That
-    //     is accepted — it is exactly what dragging an item to the top does in Steam's
-    //     own UI. Do not "fix" it by re-pausing afterwards.
-    //   * Some runtime modules re-export the same jsx binding, so reading one after
-    //     patching another already yields a wrapper; wrapping that again nests the
-    //     injection and renders the bar twice. __wsgmDlOrig is the guard.
-    //   * The Focusable predicate must stay TIGHT. Matching merely "flow-children"
-    //     plus "onActivate" also hits three chat/friends CLASS components, and the
-    //     registry order hands back a text-area component first — which rendered a
-    //     textbox into the download header instead of the buttons. Requiring a plain
-    //     function under 1500 chars that destructures the quoted "flow-children" key
-    //     together with onActivate:/focusClassName/focusWithinClassName leaves exactly
-    //     one match (live-verified). The header match is likewise shape-checked on
-    //     count+labelId, not on the title token alone.
+    // Every shape decision in the script is a device-verified finding: docs\steam-cef.md §12.
     private const string ResidentSetup = """
         var W=window.__wsgm=window.__wsgm||{};
         if(W.dlSortVer!==1){
@@ -325,4 +235,104 @@ public static class SteamDownloadSort
           };
         }
         """;
+}
+
+/// <summary>Owns the download-queue JSX wrapper through the shared patch lifecycle.</summary>
+internal sealed class SteamDownloadSortPatch : ISteamUiPatch
+{
+    /// <summary>The download sorter's stable patch id.</summary>
+    internal const string PatchId = "wsgm.download-sort";
+
+    public string Id => PatchId;
+
+    public int Version => 1;
+
+    // The queue is rendered into the Big Picture document, but it is rendered BY SharedJSContext:
+    // the jsx-runtime module this patch wraps, the module registry it comes from and the React
+    // reconciler that re-renders the queue all live there, and the Big Picture window carries the
+    // DOM and no webpack global at all. Addressing the window instead leaves the probe's runtime
+    // check permanently false, so the sorter reports Incompatible and never installs.
+    public SteamUiTargetRole TargetRole => SteamUiTargetRole.SharedJsContext;
+
+    public string ResourceKey => "steam.downloads.jsx-runtime";
+
+    public SteamUiPatchBounds Bounds { get; } = SteamUiPatchBounds.Default;
+
+    public async Task<SteamUiPatchProbeResult> ProbeAsync(
+        SteamUiPatchContext context,
+        CancellationToken cancellationToken)
+    {
+        SteamUiEvaluationResult result = await context.EvaluateAsync(
+            TargetRole,
+            "(()=>{try{const W=window.__wsgm;return JSON.stringify({ok:true,"
+                + "runtime:!!window.webpackChunksteamui,"
+                + "owned:!!(W&&Array.isArray(W.dlSortPatched)&&W.dlSortPatched.length)});"
+                + "}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()",
+            cancellationToken).ConfigureAwait(false);
+        if (!result.Reachable || result.Value is null)
+        {
+            return new SteamUiPatchProbeResult(
+                false,
+                false,
+                false,
+                null,
+                result.Error ?? "SharedJSContext is unavailable.");
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(result.Value);
+            JsonElement root = document.RootElement;
+            bool compatible = root.TryGetProperty("ok", out JsonElement ok)
+                && ok.ValueKind == JsonValueKind.True
+                && root.TryGetProperty("runtime", out JsonElement runtime)
+                && runtime.ValueKind == JsonValueKind.True;
+            return new SteamUiPatchProbeResult(
+                true,
+                compatible,
+                compatible,
+                compatible ? "download-sort-v1:jsx-runtime+focusable+queue-header" : null,
+                compatible ? null : result.Value);
+        }
+        catch (JsonException ex)
+        {
+            return new SteamUiPatchProbeResult(true, false, false, null, ex.Message);
+        }
+    }
+
+    public Task<SteamUiPatchOperationResult> ApplyAsync(
+        SteamUiPatchContext context,
+        CancellationToken cancellationToken) => EvaluateAsync(
+            context,
+            SteamDownloadSort.InstallExpression,
+            "Download queue sort installation failed.",
+            cancellationToken);
+
+    public Task<SteamUiPatchOperationResult> VerifyAsync(
+        SteamUiPatchContext context,
+        CancellationToken cancellationToken) => EvaluateAsync(
+            context,
+            "(()=>{const W=window.__wsgm;return JSON.stringify({ok:!!(W"
+                + "&&Array.isArray(W.dlSortPatched)&&W.dlSortPatched.length)});})()",
+            "Download queue sort verification failed.",
+            cancellationToken);
+
+    public Task<SteamUiPatchOperationResult> RemoveAsync(
+        SteamUiPatchContext context,
+        CancellationToken cancellationToken) => EvaluateAsync(
+            context,
+            SteamDownloadSort.RemoveExpression,
+            "Download queue sort removal failed.",
+            cancellationToken);
+
+    private static Task<SteamUiPatchOperationResult> EvaluateAsync(
+        SteamUiPatchContext context,
+        string expression,
+        string fallback,
+        CancellationToken cancellationToken) => SteamUiPatchEvaluation.EvaluateOutcomeAsync(
+            context,
+            SteamUiTargetRole.SharedJsContext,
+            expression,
+            fallback,
+            cancellationToken);
 }

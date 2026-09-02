@@ -61,7 +61,10 @@ public static class WindowFinder
     // polls, so an unthrottled warning per pid per tick would flood the capped log.
     private static readonly HashSet<string> WarnedSessionIdNames = new(StringComparer.OrdinalIgnoreCase);
 
-    private static readonly int CurrentSessionId = ReadCurrentSessionId();
+    /// <summary>This process's session id, read once: a process cannot change
+    /// sessions, and the callers are polls that must not leak a Process handle
+    /// per query.</summary>
+    public static int CurrentSessionId { get; } = ReadCurrentSessionId();
 
     private static int ReadCurrentSessionId()
     {
@@ -94,20 +97,12 @@ public static class WindowFinder
                         result.Add((uint)p.Id);
                     }
                 }
-                // Catch EVERYTHING, deliberately. This runs inside the boot splash's
-                // 250 ms Big-Picture detection poll: an exception type escaping here
-                // propagates out of FindWindow into that timer tick, so BP is never
-                // detected, the splash never fades, and an opaque cover sits over a
-                // live BP window — which is exactly what leaves the Big Picture intro
-                // video black (invariant 7). Narrowing this to the two "expected"
-                // types cost that video. The match set going quietly empty is the
-                // lesser failure; this must not throw.
+                // Catch EVERYTHING, deliberately, and warn only once per name: this
+                // feeds the splash's Big Picture detection poll, where a propagated
+                // exception or an unthrottled log line each broke a boot — see
+                // docs\boot-and-shell.md invariant 7. Do not narrow it.
                 catch (Exception ex)
                 {
-                    // Throttled to once per process name per process lifetime: the
-                    // callers are polls (250 ms splash detection, 5 s Steam monitor)
-                    // and Steam runs several helpers, so a per-pid line here floods
-                    // the capped log and pushes the boot/lease lines out of it.
                     if (WarnedSessionIdNames.Add(plain))
                     {
                         Log.Warn($"Session id unreadable for {plain} (pid {p.Id}): {ex.Message}. "
@@ -174,24 +169,8 @@ public static class WindowFinder
     /// <param name="expectedFullPath">The full image path required.</param>
     /// <returns>Whether the image path matches (or could not be read).</returns>
     public static bool ProcessImagePathEquals(uint pid, string expectedFullPath)
-    {
-        var process = NativeMethods.OpenProcess(NativeMethods.ProcessQueryLimitedInformation, false, pid);
-        if (process == 0)
-        {
-            return true;
-        }
-        try
-        {
-            var buffer = new char[1024];
-            var length = (uint)buffer.Length;
-            return !NativeMethods.QueryFullProcessImageNameW(process, 0, buffer, ref length)
-                || string.Equals(new string(buffer, 0, (int)length), expectedFullPath, StringComparison.OrdinalIgnoreCase);
-        }
-        finally
-        {
-            NativeMethods.CloseHandle(process);
-        }
-    }
+        => NativeShellProcess.TryGetImagePath(pid) is not { } path
+            || string.Equals(path, expectedFullPath, StringComparison.OrdinalIgnoreCase);
 
     [UnmanagedCallersOnly]
     private static int EnumWindowsProc(nint hWnd, nint lParam)
@@ -228,41 +207,13 @@ public static class WindowFinder
     }
 
     /// <summary>A visible, switchable top-level window discovered during enumeration.</summary>
-    public sealed record AppWindow
+    /// <param name="Hwnd">The native window handle.</param>
+    /// <param name="Title">The title presented in the switcher.</param>
+    /// <param name="ProcessId">The identifier of the owning process.</param>
+    public sealed record AppWindow(nint Hwnd, string Title, uint ProcessId)
     {
-        /// <summary>Creates a switchable-window snapshot.</summary>
-        /// <param name="hwnd">The native window handle.</param>
-        /// <param name="title">The title presented in the switcher.</param>
-        /// <param name="processId">The identifier of the owning process.</param>
-        public AppWindow(nint hwnd, string title, uint processId)
-        {
-            Hwnd = hwnd;
-            Title = title;
-            ProcessId = processId;
-        }
-
-        /// <summary>Gets the native window handle.</summary>
-        public nint Hwnd { get; init; }
-
-        /// <summary>Gets the title presented in the switcher.</summary>
-        public string Title { get; init; }
-
-        /// <summary>Gets the identifier of the owning process.</summary>
-        public uint ProcessId { get; init; }
-
         /// <summary>Gets whether the window was minimized at enumeration time.</summary>
         public bool IsMinimized { get; init; }
-
-        /// <summary>Deconstructs the window using its original positional-record shape.</summary>
-        /// <param name="hwnd">Receives the native window handle.</param>
-        /// <param name="title">Receives the title presented in the switcher.</param>
-        /// <param name="processId">Receives the identifier of the owning process.</param>
-        public void Deconstruct(out nint hwnd, out string title, out uint processId)
-        {
-            hwnd = Hwnd;
-            title = Title;
-            processId = ProcessId;
-        }
     }
 
     /// <summary>Alt-tab style enumeration: visible, titled, top-level windows that
@@ -314,7 +265,7 @@ public static class WindowFinder
             return 0;
         }
         NativeMethods.GetWindowThreadProcessId(hWnd, out var pid);
-        // Cloak query failure counts as not cloaked, matching the old inline check.
+        // Cloak query failure counts as not cloaked.
         var cloaked = NativeMethods.DwmGetWindowAttribute(hWnd, NativeMethods.DwmWaCloaked, out var value, 4) == 0
             ? value
             : 0u;

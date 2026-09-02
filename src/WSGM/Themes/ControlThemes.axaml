@@ -1,6 +1,0 @@
-<!-- ControlThemes for WSGM's templated controls (TabStrip lives in
-     TabStripTheme.axaml, CardButton in CardButtonTheme.axaml; other shared
-     control themes land here). Intentionally empty until Phase 2. -->
-<Styles xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-</Styles>

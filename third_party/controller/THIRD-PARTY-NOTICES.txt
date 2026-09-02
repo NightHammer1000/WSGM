@@ -1,0 +1,18 @@
+WSGM controller dependency notices
+==================================
+
+The controller installer component ships the external binaries named below with the corresponding
+license texts in this directory. VIIPER carries its own notice beside libviiper.dll.
+
+usbip-win2 0.9.7.7
+Copyright (c) 2021-2026, Vadym Hrynchyshyn <vadimgrn@gmail.com>
+License: BSD-2-Clause
+Source: https://github.com/vadimgrn/usbip-win2
+License text: licenses/usbip-win2-BSD-2-Clause.txt
+
+HidHide 1.5.230.0
+Copyright (c) 2020 Eric Korff de Gidts
+Copyright (c) 2021-2023 Benjamin Höglinger-Stelzer
+License: MIT
+Source: https://github.com/nefarius/HidHide
+License text: licenses/HidHide-MIT.txt

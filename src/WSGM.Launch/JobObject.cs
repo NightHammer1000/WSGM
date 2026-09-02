@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,8 +33,9 @@ internal sealed partial class JobObject : IDisposable
     private JobObject(nint handle) => _handle = handle;
 
     /// <summary>Creates a job and assigns an already-started process to it.
-    /// Returns null when the platform refuses either step, which leaves the caller
-    /// on its previous single-process behavior rather than failing the launch.</summary>
+    /// Returns null when the platform refuses either step. Callers must terminate the freshly
+    /// started target and fail the launch; continuing without tree ownership would release Steam
+    /// state as soon as a bootstrapper exits.</summary>
     /// <param name="processHandle">Handle of the freshly started process.</param>
     internal static JobObject? TryCapture(nint processHandle)
     {
@@ -69,12 +71,15 @@ internal sealed partial class JobObject : IDisposable
     }
 
     /// <summary>Ends every process still in the job.</summary>
-    internal void TerminateTree()
+    internal bool TerminateTree()
     {
         if (_handle != 0 && !TerminateJobObject(_handle, 1))
         {
             LaunchLog.Error($"Could not terminate the job object (error {Marshal.GetLastPInvokeError()}).");
+            return false;
         }
+
+        return _handle != 0;
     }
 
     private uint ActiveProcesses()
@@ -84,11 +89,19 @@ internal sealed partial class JobObject : IDisposable
             return 0;
         }
         var info = default(JobObjectBasicAccountingInfo);
-        return QueryInformationJobObject(
-            _handle, JobObjectBasicAccountingInformation, ref info,
-            (uint)Marshal.SizeOf<JobObjectBasicAccountingInfo>(), 0)
-            ? info.ActiveProcesses
-            : 0;
+        if (!QueryInformationJobObject(
+                _handle,
+                JobObjectBasicAccountingInformation,
+                ref info,
+                (uint)Marshal.SizeOf<JobObjectBasicAccountingInfo>(),
+                0))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastPInvokeError(),
+                "Could not query the wrapper's target job object.");
+        }
+
+        return info.ActiveProcesses;
     }
 
     /// <summary>Closes the job handle. The job is deliberately created without

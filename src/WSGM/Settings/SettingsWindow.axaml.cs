@@ -1,5 +1,7 @@
-using System.Collections.Generic;
+using System;
+using System.Linq;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -13,13 +15,13 @@ using WSGM.Shell;
 namespace WSGM.Settings;
 
 /// <summary>The interactive settings window for shell and game-mode configuration:
-/// a bumper <see cref="TabStrip"/> over seven always-alive pages (toggled by
+/// a bumper <see cref="TabStrip"/> over its always-alive pages (toggled by
 /// visibility so their state survives switching) and a bottom status strip.</summary>
 public partial class SettingsWindow : Window
 {
     private readonly SettingsViewModel _viewModel = new();
     private readonly GamepadService _gamepad = new();
-    private readonly ShortcutRecorders _recorders;
+    private readonly Control[] _pages;
     private GamepadNavigation? _navigation;
     private OverlayController? _testOverlay;
     private BootSplashWindow? _splashPreview;
@@ -71,18 +73,27 @@ public partial class SettingsWindow : Window
         _leaseHandoffPending = gameModeSurface;
         InitializeComponent();
         DataContext = _viewModel;
-        _recorders = new ShortcutRecorders(_viewModel, () => _closed);
+        _viewModel.PropertyChanged += OnViewModelPropertyChanged;
 
-        Tabs.Tabs = new List<TabStripItem>
-        {
-            new("System", Icons.Monitor, 0),
-            new("Steam", Icons.SteamLike, 1),
-            new("Integration", Icons.Wrench, 2),
-            new("Startup", Icons.Rocket, 3),
-            new("Quick access", Icons.Panel, 4),
-            new("Display", Icons.Monitor, 5),
-            new("Appearance", Icons.Palette, 6),
-        };
+        // The one page table: it drives the tab strip, the visibility toggle and
+        // the focus landing alike (the XAML hosts the same pages in this order).
+        (string Title, Avalonia.Media.StreamGeometry Icon, Control Page)[] pages =
+        [
+            ("System", Icons.Monitor, PageSystem),
+            ("Steam", Icons.SteamLike, PageSteam),
+            ("Integration", Icons.Wrench, PageIntegration),
+            ("Device setup", Icons.SteamLike, PageDevice),
+            ("Startup", Icons.Rocket, PageStartup),
+            ("Quick access", Icons.Panel, PageQuickAccess),
+            ("Display", Icons.Monitor, PageDisplay),
+            ("Appearance", Icons.Palette, PageAppearance),
+            // Last, because its content belongs to whichever plugin is installed: WSGM's own pages
+            // keep their positions on every machine rather than shifting around a tab that may not
+            // be there.
+            ("Plugin", Icons.Wrench, PagePluginSettings),
+        ];
+        _pages = [.. pages.Select(static entry => entry.Page)];
+        Tabs.Tabs = [.. pages.Select((entry, index) => new TabStripItem(entry.Title, entry.Icon, index))];
         Tabs.SelectionChanged += OnTabSelectionChanged;
 
         // Controller navigation for the settings window itself. LB/RB cycle the
@@ -141,11 +152,13 @@ public partial class SettingsWindow : Window
             // Opened (not the constructor) so a window that is built but never shown
             // cannot leave a session — and therefore a pinned directory — behind.
             SplashTheme.BeginImportSession();
+            _ = _viewModel.RefreshDeviceOwnerStatusAsync();
             MaybeShowQuickSetup();
         };
         Closed += (_, _) =>
         {
             _closed = true;
+            _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
             _gamepad.Stop();
             WindowFinder.ExcludeOwnWindow(_switchableHwnd);
             // _closed makes the lease unwanted; the reconciler releases it.
@@ -173,9 +186,12 @@ public partial class SettingsWindow : Window
                 Themes.AccentPalette.Apply(
                     app, Themes.AccentPalette.Parse(ConfigStore.Load().AccentColor));
             }
-            // Same slot the two recorders were disposed in before they moved
-            // into ShortcutRecorders (key recorder first, chord second).
-            _recorders.Dispose();
+            // Recorder disposal keeps its historical slot and order (key recorder
+            // first, chord second) so the hooks are gone on every close path.
+            _keyRecorder?.Dispose();
+            _keyRecorder = null;
+            _chordRecorder?.Dispose();
+            _chordRecorder = null;
             // LAST: nothing above may still read a staged import. Any save has long
             // committed the staged images into the stable splash assets by now, and an
             // abandoned import is exactly what this frees — up to ~128 MB of staged
@@ -187,32 +203,19 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>One selection path for touch, mouse, keyboard and the LB/RB
-    /// shoulder buttons: the TabStrip owns the index, this toggles the seven
+    /// shoulder buttons: the TabStrip owns the index, this toggles the
     /// always-alive pages' visibility.</summary>
     private void OnTabSelectionChanged(object? sender, TabStripSelectionChangedEventArgs e)
     {
-        PageSystem.IsVisible = e.NewIndex == 0;
-        PageSteam.IsVisible = e.NewIndex == 1;
-        PageIntegration.IsVisible = e.NewIndex == 2;
-        PageStartup.IsVisible = e.NewIndex == 3;
-        PageQuickAccess.IsVisible = e.NewIndex == 4;
-        PageDisplay.IsVisible = e.NewIndex == 5;
-        PageAppearance.IsVisible = e.NewIndex == 6;
+        for (var index = 0; index < _pages.Length; index++)
+        {
+            _pages[index].IsVisible = index == e.NewIndex;
+        }
 
         // Land controller focus inside the newly shown page — without this the
         // next D-pad press falls back to the window's first focusable, which is
         // always the "System" tab button regardless of the active tab.
-        var page = e.NewIndex switch
-        {
-            0 => (Control)PageSystem,
-            1 => PageSteam,
-            2 => PageIntegration,
-            3 => PageStartup,
-            4 => PageQuickAccess,
-            5 => PageDisplay,
-            _ => PageAppearance,
-        };
-        FocusFirstControl(page);
+        FocusFirstControl(_pages[Math.Clamp(e.NewIndex, 0, _pages.Length - 1)]);
     }
 
     private static void FocusFirstControl(Control page)
@@ -238,27 +241,11 @@ public partial class SettingsWindow : Window
     internal void ShowTestOverlay()
     {
         _testOverlay?.Dispose();
-        var config = _viewModel.SnapshotForTest();
+        var config = _viewModel.SnapshotForPreview();
         _testOverlay = new OverlayController(config, monitor: null, new SessionModes(config, monitor: null),
             previewOnly: true);
         _testOverlay.ShowOverlay();
     }
-
-    /// <summary>Shows the game-mode taskbar for a local test (called by the
-    /// Quick access page). Direct ShowTaskbar: the swipe routing's game-mode
-    /// gate would bounce a dev desktop (explorer alive) back to quick access,
-    /// so the button bypasses routing to make the bar locally testable.</summary>
-    internal void ShowTestTaskbar()
-    {
-        _testOverlay?.Dispose();
-        var config = _viewModel.SnapshotForTest();
-        _testOverlay = new OverlayController(config, monitor: null, new SessionModes(config, monitor: null),
-            previewOnly: true);
-        _testOverlay.ShowTaskbar();
-    }
-
-    /// <summary>Creates the controller navigation attached to this window
-    /// (initial Opened wiring and restoration after a splash preview closes).</summary>
 
     /// <summary>Raises Quick Setup over the window on a first run, or after a build
     /// adds a setting that needs an explicit decision.</summary>
@@ -276,8 +263,8 @@ public partial class SettingsWindow : Window
         }
         QuickSetupSteamInput.IsChecked = viewModel.SteamInputManagementEnabled;
         QuickSetupCef.IsChecked = viewModel.CefEnabled;
-        SettingsRoot.IsEnabled = false;
         QuickSetupOverlay.IsVisible = true;
+        UpdateSettingsEnabled();
         QuickSetupContinueButton.Focus();
     }
 
@@ -293,7 +280,7 @@ public partial class SettingsWindow : Window
     private void CompleteQuickSetup(bool steamInput, bool cef)
     {
         QuickSetupOverlay.IsVisible = false;
-        SettingsRoot.IsEnabled = true;
+        UpdateSettingsEnabled();
         if (DataContext is not SettingsViewModel viewModel)
         {
             return;
@@ -307,15 +294,36 @@ public partial class SettingsWindow : Window
         viewModel.SaveCommand.Execute(null);
     }
 
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SettingsViewModel.IsSaving))
+        {
+            UpdateSettingsEnabled();
+        }
+    }
+
+    /// <summary>Keeps the page controls inert while either Quick Setup owns input or a
+    /// save is persisting its immutable snapshot. This prevents a post-capture edit
+    /// from being followed by a misleading "Saved" acknowledgement.</summary>
+    private void UpdateSettingsEnabled() =>
+        SettingsRoot.IsEnabled = !_viewModel.IsSaving && !QuickSetupOverlay.IsVisible;
+
+    /// <summary>Whether the unsaved glyph selection is the Nintendo family, whose
+    /// A/B labels are swapped relative to Xbox — shared by every
+    /// <see cref="GamepadNavigation"/> this window creates.</summary>
+    private bool IsNintendoLayout() => _viewModel.GlyphStyleIndex == 2;
+
+    /// <summary>Creates the controller navigation attached to this window
+    /// (initial Opened wiring and restoration after a splash preview closes).</summary>
     private GamepadNavigation CreateWindowNavigation() => new(_gamepad, this, back: BackOrClose,
-        isNintendoLayout: () => _viewModel.GlyphStyleIndex == 2,
+        isNintendoLayout: IsNintendoLayout,
         tabPrevious: Tabs.SelectPrevious,
         tabNext: Tabs.SelectNext);
 
     /// <summary>The controller Back action. A color-picker flyout the Appearance
     /// page has open takes B first: its content lives in a popup root that
     /// gamepad navigation cannot enter, so without this B would close the whole
-    /// window and discard every unsaved edit on all seven pages.</summary>
+    /// window and discard every unsaved edit on every page.</summary>
     private void BackOrClose()
     {
         if (PageAppearance.TryCloseColorFlyout())
@@ -349,16 +357,92 @@ public partial class SettingsWindow : Window
     /// <param name="title">The dialog window title.</param>
     internal void ShowOnScreenKeyboard(TextBox target, string title)
     {
-        var keyboard = new OnScreenKeyboard { Target = target };
+        ArgumentNullException.ThrowIfNull(target);
+        OpenKeyboardEditor(
+            target.Text ?? string.Empty,
+            target.MaxLength,
+            title,
+            value =>
+            {
+                target.Text = value;
+                target.CaretIndex = value.Length;
+                target.SelectionStart = value.Length;
+                target.SelectionEnd = value.Length;
+                return null;
+            });
+    }
+
+    /// <summary>Opens the controller keyboard for a value that has no fixed TextBox,
+    /// such as a row created from a plugin manifest.</summary>
+    /// <param name="initialValue">Initial text shown to the user.</param>
+    /// <param name="maximumLength">Hard input bound.</param>
+    /// <param name="title">Dialog title.</param>
+    /// <param name="accept">Applies the result and returns an error to keep the dialog open, or null.</param>
+    internal void ShowOnScreenKeyboard(
+        string initialValue,
+        int maximumLength,
+        string title,
+        Func<string, string?> accept)
+    {
+        ArgumentNullException.ThrowIfNull(accept);
+        OpenKeyboardEditor(initialValue, Math.Max(1, maximumLength), title, accept);
+    }
+
+    private void OpenKeyboardEditor(
+        string initialValue,
+        int maximumLength,
+        string title,
+        Func<string, string?> accept)
+    {
+        var editor = new TextBox
+        {
+            Text = initialValue ?? string.Empty,
+            MaxLength = Math.Max(0, maximumLength),
+            Margin = new Thickness(12, 12, 12, 0),
+            MinHeight = 44,
+        };
+        editor.CaretIndex = editor.Text?.Length ?? 0;
+        editor.SelectionStart = editor.CaretIndex;
+        editor.SelectionEnd = editor.CaretIndex;
+        var keyboard = new OnScreenKeyboard { Target = editor };
+        var validation = new TextBlock
+        {
+            IsVisible = false,
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+            Margin = new Thickness(12, 8, 12, 0),
+        };
+        var content = new StackPanel();
+        content.Children.Add(editor);
+        content.Children.Add(validation);
+        content.Children.Add(keyboard);
         var window = new Window
         {
             Title = title,
             Width = 760,
-            Height = 430,
+            Height = 460,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            Content = keyboard,
+            Content = content,
         };
-        keyboard.Accepted += (_, _) => window.Close();
+        keyboard.Accepted += (_, _) =>
+        {
+            try
+            {
+                string? error = accept(editor.Text ?? string.Empty);
+                if (!string.IsNullOrEmpty(error))
+                {
+                    validation.Text = error;
+                    validation.IsVisible = true;
+                    return;
+                }
+                window.Close();
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                Log.Warn($"On-screen keyboard value apply failed: {ex.Message}");
+                validation.Text = $"Could not apply that value: {ex.Message}";
+                validation.IsVisible = true;
+            }
+        };
         GamepadNavigation? keyboardNavigation = null;
         window.Opened += (_, _) =>
         {
@@ -367,7 +451,7 @@ public partial class SettingsWindow : Window
                 _navigation.IsEnabled = false;
             }
             keyboardNavigation = new GamepadNavigation(_gamepad, window, back: window.Close,
-                isNintendoLayout: () => _viewModel.GlyphStyleIndex == 2);
+                isNintendoLayout: IsNintendoLayout);
         };
         window.Closed += (_, _) =>
         {
@@ -538,18 +622,100 @@ public partial class SettingsWindow : Window
         preview.Show();
         _navigation?.Dispose();
         _navigation = new GamepadNavigation(_gamepad, preview, back: preview.Close,
-            isNintendoLayout: () => _viewModel.GlyphStyleIndex == 2,
+            isNintendoLayout: IsNintendoLayout,
             preferredFocus: () => preview.DefaultFocusTarget);
     }
 
-    /// <summary>Starts hotkey recording (called by the Quick access page).</summary>
-    internal void RecordHotkey() => Observe(_recorders.RecordHotkey(), "Hotkey recording");
+    // --- Shortcut recorders (keyboard hotkey + controller chord) ---
+    // The 200 ms arming delay keeps the press that STARTED recording out of the
+    // recording, and the re-check after that delay prevents installing a
+    // low-level keyboard hook with nothing left to dispose it — or one the user
+    // already cancelled.
+    private KeyRecorder? _keyRecorder;
+    private GamepadChordRecorder? _chordRecorder;
 
-    /// <summary>Clears the recorded hotkey (called by the Quick access page).</summary>
-    internal void ClearHotkey() => _recorders.ClearHotkey();
+    // Bumped by every arm AND every clear, so the continuation after the arming
+    // delay can tell whether its own request is still the one the user wants.
+    private int _hotkeyGeneration;
+    private int _chordGeneration;
+
+    /// <summary>Starts hotkey recording (called by the Quick access page).</summary>
+    internal void RecordHotkey() => Observe(ArmHotkeyRecorder(), "Hotkey recording");
+
+    /// <summary>Arms keyboard-shortcut recording (200 ms delayed, cancel- and
+    /// closed-window safe).</summary>
+    /// <returns>A task that completes once the recorder is armed, or once this
+    /// request has been superseded.</returns>
+    private async Task ArmHotkeyRecorder()
+    {
+        // Small delay so the key/controller press that started recording (Enter, A)
+        // isn't the thing we record — same trick Handheld Companion uses.
+        _viewModel.SetHotkeyRecording(true);
+        var generation = ++_hotkeyGeneration;
+        await Task.Delay(200);
+        if (_closed || generation != _hotkeyGeneration)
+        {
+            // Window closed during the delay: creating the recorder now would
+            // install a low-level keyboard hook with nothing left to dispose it.
+            // A cleared/restarted recording is the same hazard from the other
+            // side — the UI already says nothing is being recorded, so the hook
+            // would swallow the user's next keystroke anywhere and silently make
+            // it the hotkey (invariant 2: the hook exists only while recording).
+            return;
+        }
+
+        _keyRecorder?.Dispose();
+        _keyRecorder = new KeyRecorder();
+        _keyRecorder.Recorded += hotkey =>
+        {
+            _viewModel.ApplyRecordedHotkey(hotkey);
+            _keyRecorder?.Dispose();
+            _keyRecorder = null;
+        };
+        _keyRecorder.Start();
+    }
+
+    /// <summary>Clears the recorded hotkey and stops any active recording
+    /// (called by the Quick access page).</summary>
+    internal void ClearHotkey()
+    {
+        _hotkeyGeneration++;
+        _keyRecorder?.Dispose();
+        _keyRecorder = null;
+        _viewModel.ClearHotkey();
+    }
 
     /// <summary>Starts controller-chord recording (called by the Quick access page).</summary>
-    internal void RecordChord() => Observe(_recorders.RecordChord(), "Chord recording");
+    internal void RecordChord() => Observe(ArmChordRecorder(), "Chord recording");
+
+    /// <summary>Arms controller-chord recording (200 ms delayed, cancel- and
+    /// closed-window safe).</summary>
+    /// <returns>A task that completes once the recorder is armed, or once this
+    /// request has been superseded.</returns>
+    private async Task ArmChordRecorder()
+    {
+        _viewModel.SetChordRecording(true);
+        var generation = ++_chordGeneration;
+        await Task.Delay(200);
+        if (_closed || generation != _chordGeneration)
+        {
+            // Same races as the hotkey recorder: no recorder after the window is
+            // gone, and none after the user cleared or restarted the recording.
+            return;
+        }
+
+        _chordRecorder?.Dispose();
+        // The window's own polling service — the chord recorder shares it rather
+        // than running a second 16 ms SDL poller.
+        _chordRecorder = new GamepadChordRecorder(_gamepad);
+        _chordRecorder.Recorded += (buttons, hold) =>
+        {
+            _viewModel.ApplyRecordedChord(buttons, hold);
+            _chordRecorder?.Dispose();
+            _chordRecorder = null;
+        };
+        _chordRecorder.Start();
+    }
 
     /// <summary>Observes an armed recorder: the recorders are manager operations,
     /// not framework event handlers, so a throw after their arming delay is logged
@@ -562,6 +728,13 @@ public partial class SettingsWindow : Window
             TaskContinuationOptions.OnlyOnFaulted,
             TaskScheduler.Default);
 
-    /// <summary>Clears the recorded chord (called by the Quick access page).</summary>
-    internal void ClearChord() => _recorders.ClearChord();
+    /// <summary>Clears the recorded chord and stops any active recording
+    /// (called by the Quick access page).</summary>
+    internal void ClearChord()
+    {
+        _chordGeneration++;
+        _chordRecorder?.Dispose();
+        _chordRecorder = null;
+        _viewModel.ClearChord();
+    }
 }

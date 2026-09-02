@@ -1,6 +1,6 @@
 # Controls
 
-Controls contains AOT-safe reusable Avalonia controls: the shared tab strip, card buttons, icons,
+Controls contains reusable Avalonia controls: the shared tab strip, card buttons, icons,
 radio icon, and on-screen keyboard.
 
 - Keep controls presentation-oriented; session, Steam, and device policy belongs in Shell/Core

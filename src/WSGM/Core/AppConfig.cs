@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using Microsoft.Win32;
+using WSGM.Device.Sdk.Settings;
 
 namespace WSGM.Core;
 
@@ -57,38 +58,29 @@ public sealed class GamepadChordConfig
     public bool Hold { get; set; }
 }
 
-/// <summary>What an inward edge swipe opens.</summary>
-public enum EdgeAction
-{
-    /// <summary>The quick-access panel.</summary>
-    QuickAccess,
-
-    /// <summary>The game-mode taskbar (the swipe is ignored in desktop mode,
-    /// where explorer's real taskbar owns the bottom edge).</summary>
-    Taskbar,
-}
-
 /// <summary>Controls the raw-input edge-swipe activation areas.</summary>
+/// <remarks>
+/// The SteamOS edge map: top and bottom open WSGM's quick access sheet (bottom lands on
+/// the Open apps strip and is ignored in desktop mode, where explorer's taskbar owns
+/// that edge); left and right send Steam Big Picture's own menu shortcuts.
+/// </remarks>
 public sealed class GestureConfig
 {
-    /// <summary>Whether a swipe from the bottom edge is recognized.</summary>
+    /// <summary>Whether a swipe up from the bottom edge opens the quick access sheet
+    /// with focus on its Open apps strip (game mode only).</summary>
     public bool BottomEdge { get; set; } = true;
 
-    /// <summary>Whether a swipe from the right edge opens the overlay.</summary>
-    public bool RightEdge { get; set; } = true;
+    /// <summary>Whether a swipe down from the top edge opens the quick access sheet.</summary>
+    public bool TopEdge { get; set; } = true;
 
     /// <summary>Whether a swipe from the left edge opens Steam's Big Picture menu.</summary>
     public bool LeftEdgeSteamMenu { get; set; } = true;
 
-    /// <summary>Whether a swipe from the top edge opens Steam's Big Picture quick-access menu.</summary>
-    public bool TopEdgeSteamQuickAccess { get; set; } = true;
+    /// <summary>Whether a swipe from the right edge opens Steam's Big Picture quick-access menu.</summary>
+    public bool RightEdgeSteamQuickAccess { get; set; } = true;
 
     /// <summary>Strip thickness in physical pixels.</summary>
     public int StripThickness { get; set; } = 16;
-
-    /// <summary>What the bottom-edge swipe opens (the right edge always opens
-    /// quick access).</summary>
-    public EdgeAction BottomEdgeAction { get; set; } = EdgeAction.Taskbar;
 }
 
 /// <summary>Selects the controller-button glyph family rendered by the UI.</summary>
@@ -461,32 +453,11 @@ public sealed class CardLibraryConfig
     /// <summary>App ids installed on the card (remembered while it is ejected).</summary>
     public List<long> AppIds { get; set; } = [];
 
-    /// <summary>The Steam collection id WSGM created for this card's tab, so it
-    /// updates its own collection in place and never adopts a same-named user one.</summary>
-    public string CollectionId { get; set; } = "";
-
-    /// <summary>Ticks (UTC) the card was last seen inserted.</summary>
-    public long LastSeenTicks { get; set; }
-
-    /// <summary>The drive letter the card last mounted as (diagnostic only).</summary>
-    public string LastLetter { get; set; } = "";
-
     /// <summary>The Steam-side library label as last seen in sync with
     /// <see cref="Name"/>. Names follow Steam only while Name equals this value;
     /// a WSGM-side rename leaves it stale until Steam's config catches up, which
     /// is what stops a lagging libraryfolders.vdf from reverting the rename.</summary>
     public string LastSteamLabel { get; set; } = "";
-}
-
-/// <summary>One auto-generated category ("genre") library tab: a WSGM-owned Steam
-/// collection whose membership is recomputed from the library's store tags.</summary>
-public sealed class CategoryTabConfig
-{
-    /// <summary>The genre/category name (also the collection's display name).</summary>
-    public string Name { get; set; } = "";
-
-    /// <summary>The Steam collection id WSGM created for this category.</summary>
-    public string CollectionId { get; set; } = "";
 }
 
 /// <summary>One user-built custom library tab: a WSGM-owned Steam collection whose
@@ -513,10 +484,6 @@ public sealed class CustomTabConfig
     /// <summary>The top-level filter group. Its <see cref="FilterNode.Mode"/> is the
     /// tab's AND/OR; its children are the filters.</summary>
     public FilterNode FilterTree { get; set; } = new() { Kind = FilterKind.Merge };
-
-    /// <summary>The Steam collection id WSGM created for this tab, so it updates its
-    /// own collection in place and never adopts a same-named user one.</summary>
-    public string CollectionId { get; set; } = "";
 }
 
 /// <summary>One of Steam's own library tabs as last observed in the tab strip,
@@ -531,12 +498,115 @@ public sealed class NativeTabConfig
     public string Title { get; set; } = "";
 }
 
+/// <summary>Persistent shared RTSS policy projected into overlay and native QAM.</summary>
+public sealed class PerformanceConfig
+{
+    /// <summary>Whether WSGM may observe and change supported RTSS profile properties.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Global RTSS frame limit; zero disables limiting.</summary>
+    public int? FrameLimit { get; set; }
+
+    /// <summary>Global performance-overlay level when the adapter advertises a verified mapping.</summary>
+    public int? OverlayLevel { get; set; }
+
+    /// <summary>How a frame limit relates to the panel's refresh rate.</summary>
+    /// <remarks>
+    /// Global rather than per-application: it decides whether WSGM changes display modes at all,
+    /// which is a tolerance for mode-change risk the user holds once, not per game.
+    /// </remarks>
+    public FrameLimitStrategy FrameLimitStrategy { get; set; } = FrameLimitStrategy.FrameLimitOnly;
+
+    /// <summary>Global sustained power limit in watts, or null to leave it to the device.</summary>
+    public int? TdpWatts { get; set; }
+
+    /// <summary>Global variable-refresh preference, or null to leave the panel as found.</summary>
+    public bool? VariableRefreshRate { get; set; }
+
+    /// <summary>Custom overlay (level 4) widget order — HandheldCompanion's widget names,
+    /// comma-separated; unknown names are ignored.</summary>
+    public string OsdCustomOrder { get; set; } = "Time,GPU,CPU,VRAM,RAM,BATT,FPS";
+
+    /// <summary>Custom overlay clock detail: 0 hidden, 1 short time, 2 full timestamp.</summary>
+    public int OsdCustomTime { get; set; } = 2;
+
+    /// <summary>Custom overlay framerate detail: 0 hidden, 1 FPS, 2 FPS and frametime.</summary>
+    public int OsdCustomFps { get; set; } = 2;
+
+    /// <summary>Custom overlay CPU detail: 0 hidden, 1 load and power, 2 adds temperature.</summary>
+    public int OsdCustomCpu { get; set; } = 2;
+
+    /// <summary>Custom overlay memory detail: 0 hidden, 1 used, 2 used of total.</summary>
+    public int OsdCustomRam { get; set; } = 2;
+
+    /// <summary>Custom overlay GPU detail: 0 hidden, 1 load and power, 2 adds temperature.</summary>
+    public int OsdCustomGpu { get; set; } = 2;
+
+    /// <summary>Custom overlay video-memory detail: 0 hidden, 1 used, 2 used of total.</summary>
+    public int OsdCustomVram { get; set; } = 2;
+
+    /// <summary>Custom overlay battery detail: 0 hidden, 1 percent and remaining time, 2 adds
+    /// the charge rate.</summary>
+    public int OsdCustomBattery { get; set; } = 2;
+
+    /// <summary>Per-application overrides keyed by WSGM's canonical application identity.</summary>
+    public List<PerformanceApplicationConfig> Applications { get; set; } = [];
+}
+
+/// <summary>One persistent RTSS application-profile override.</summary>
+public sealed class PerformanceApplicationConfig
+{
+    /// <summary>Canonical WSGM application identity.</summary>
+    public string ApplicationId { get; set; } = string.Empty;
+
+    /// <summary>Exact executable profile name understood by RTSS.</summary>
+    public string RtssProfileName { get; set; } = string.Empty;
+
+    /// <summary>Application frame-limit override, or null to inherit global policy.</summary>
+    public int? FrameLimit { get; set; }
+
+    /// <summary>Application overlay-level override, or null to inherit global policy.</summary>
+    public int? OverlayLevel { get; set; }
+
+    /// <summary>
+    /// Whether this application's own values apply at all.
+    /// </summary>
+    /// <remarks>
+    /// The switch behind Steam's "Use per-game profile". Off keeps the stored values so turning it
+    /// back on restores what the user set up rather than starting from the global defaults again —
+    /// the same reversibility the device master switch has.
+    /// </remarks>
+    public bool UsePerGameProfile { get; set; }
+
+    /// <summary>Application sustained power limit in watts, or null to inherit.</summary>
+    public int? TdpWatts { get; set; }
+
+    /// <summary>Application variable-refresh preference, or null to inherit.</summary>
+    public bool? VariableRefreshRate { get; set; }
+}
+
 /// <summary>Persisted user settings and exact Windows-state snapshots for WSGM.</summary>
 public sealed class AppConfig
 {
+    /// <summary>Optional device-plugin platform, ownership, and desired-state settings.</summary>
+    public DeviceIntegrationConfig DeviceIntegration { get; set; } = new();
+
+    /// <summary>Optional RTSS policy, independent from Device Integration.</summary>
+    public PerformanceConfig Performance { get; set; } = new();
+
     /// <summary>Restart Steam automatically when it exits. Steam itself is located
     /// via the registry (see Core.Steam) — there is nothing else to configure.</summary>
     public bool SteamAutoRelaunch { get; set; }
+
+    /// <summary>Whether the complete Steam client is launched at medium integrity.</summary>
+    /// <remarks>
+    /// Off by default, which starts Steam at WSGM's own integrity. Elevated Steam is the deliberate
+    /// default because several WSGM mechanisms drive the running client and a mismatched pair loses
+    /// UIPI messages, but it also elevates every game Steam starts. This is the user-owned choice
+    /// between the two, and it applies to Steam itself rather than to individual games, which
+    /// <c>WSGM.Launch</c> de-elevates independently.
+    /// </remarks>
+    public bool SteamLaunchUnelevated { get; set; }
 
     /// <summary>Keep a card's injected library tab after the card is
     /// ejected. The games show as not-installed until it is reinserted.</summary>
@@ -549,9 +619,6 @@ public sealed class AppConfig
     /// <summary>Cards forgotten while still inserted. Discovery skips these identities
     /// until a scan observes them absent, so Forget does not immediately undo itself.</summary>
     public List<string> ForgottenInsertedCardIds { get; set; } = [];
-
-    /// <summary>Legacy WSGM-owned genre collection IDs retained only until cleanup.</summary>
-    public List<CategoryTabConfig> CategoryTabs { get; set; } = [];
 
     /// <summary>User-built custom filter tabs (the TabMaster analog).</summary>
     public List<CustomTabConfig> CustomTabs { get; set; } = [];
@@ -611,7 +678,7 @@ public sealed class AppConfig
 
     /// <summary>UI accent color as an <c>#AARRGGBB</c>/<c>#RRGGBB</c> string, applied
     /// to the Fluent theme and the Hc accent tokens at startup and on save.</summary>
-    public string AccentColor { get; set; } = "#FFFF9D3D";
+    public string AccentColor { get; set; } = Themes.AccentPalette.DefaultAccent;
     /// <summary>Whether the logon service boots the session into game mode. Projected
     /// into boot.json (see Core\BootManifest) because the SYSTEM service never parses
     /// this file. False = sign-in leaves the plain desktop alone.</summary>
@@ -673,13 +740,15 @@ public sealed class AppConfig
     /// <summary>Touch-edge gesture configuration for opening the overlay.</summary>
     public GestureConfig Gestures { get; set; } = new();
 
+    /// <summary>Rows pinned to the quick access sheet's home tab, as stable row ids
+    /// (a row's <c>Tag</c>: <c>home.steam</c>, <c>system.keep-awake</c>, a device
+    /// capability key, …) in display order. An id the running build cannot resolve
+    /// is kept (a device plugin's row survives the device being unplugged) but not
+    /// rendered.</summary>
+    public List<string> QuickAccessPins { get; set; } = [];
+
     /// <summary>Controller glyph family displayed by the UI.</summary>
     public GlyphStyle GlyphStyle { get; set; } = GlyphStyle.Xbox;
-
-    /// <summary>Legacy pre-device-identity list: scaling percentages in active-source
-    /// enumeration order. Kept only so configs written by older versions still
-    /// restore (migrated into SavedDisplayScaleEntries on the next restore).</summary>
-    public List<int> SavedDisplayScales { get; set; } = [];
 
     /// <summary>Per-display scaling captured before game mode forced 100%. Non-empty
     /// means "not yet restored" — survives crashes so recovery paths can put
@@ -729,13 +798,9 @@ public sealed class AppConfig
     /// <summary>Original secure-desktop prompt setting.</summary>
     public int PreviousUacSecureDesktop { get; set; } = 1;
 
-    /// <summary>Whether Windows required a sign-in on wake before WSGM changed it.
-    /// Kept for configs captured by older versions; new snapshots also store the
-    /// exact per-scheme values below.</summary>
+    /// <summary>Whether the lock-on-wake state was captured before WSGM changed it
+    /// (the exact per-scheme values live in the fields below).</summary>
     public bool PreviousLockOnWakeSnapshotCaptured { get; set; }
-
-    /// <summary>Legacy original sign-in-on-wake state for older configurations.</summary>
-    public bool PreviousLockOnWakeRequired { get; set; } = true;
 
     /// <summary>Previous HKLM Personalization\NoLockScreen value (-1 = absent).</summary>
     public int PreviousNoLockScreen { get; set; } = -1;
@@ -752,20 +817,38 @@ public sealed class AppConfig
 
     /// <summary>Pre-existing DC CONSOLELOCK policy value; <c>-1</c> means absent.</summary>
     public int PreviousConsoleLockPolicyDc { get; set; } = -1;
+}
 
-    /// <summary>Legacy cleanup state for posture/keyboard values written by older
-    /// WSGM builds. Current builds retain these fields only to restore and clear
-    /// that old snapshot; they never capture a new one.</summary>
-    public bool SlateModeSnapshotCaptured { get; set; }
+/// <summary>Decides when the first-run Quick Setup panel is shown.</summary>
+/// <remarks>
+/// Keyed on a revision rather than a "seen it" flag so the panel can come back
+/// exactly once when a later build adds a setting that needs an explicit decision -
+/// the same way Steam Input Management needed one. Raising
+/// <see cref="CurrentRevision"/> is the whole trigger; everything else follows from
+/// the comparison, and a user who has already answered a revision is never asked
+/// about it again.
+/// </remarks>
+public static class QuickSetup
+{
+    /// <summary>The revision this build asks about.</summary>
+    /// <remarks>
+    /// Revision 1 introduced Steam Input Management, which writes a file into
+    /// Steam's own install directory, and the Steam CEF integration master switch.
+    /// Raise this only when a NEW setting genuinely needs the user's decision -
+    /// every raise interrupts every existing device once.
+    /// </remarks>
+    public const int CurrentRevision = 1;
 
-    /// <summary>Original ConvertibleSlateMode value; <c>-1</c> means absent.</summary>
-    public int PreviousSlateMode { get; set; } = -1;
+    /// <summary>Whether the panel should be shown for the given configuration.</summary>
+    /// <param name="config">The configuration to test.</param>
+    /// <returns><see langword="true"/> when this device has not answered the current revision.</returns>
+    public static bool ShouldShow(AppConfig config) =>
+        config.QuickSetupRevision < CurrentRevision;
 
-    /// <summary>Original TouchKeyboardTapInvoke value; <c>-1</c> means absent.</summary>
-    public int PreviousTouchKeyboardTapInvoke { get; set; } = -1;
-
-    /// <summary>Legacy marker recording whether WSGM changed ConvertibleSlateMode.</summary>
-    public bool? ConvertibleSlateModeModifiedByWsgm { get; set; }
+    /// <summary>Records that the current revision has been answered.</summary>
+    /// <param name="config">The configuration to stamp.</param>
+    public static void MarkCompleted(AppConfig config) =>
+        config.QuickSetupRevision = CurrentRevision;
 }
 
 /// <summary>Master switch and per-feature sub-toggles for WSGM's Steam CEF
@@ -798,6 +881,11 @@ public sealed class CefConfig
     /// <summary>Big Picture header Wi-Fi indicator (feeds Steam's <c>SystemNetworkStore</c>).</summary>
     public bool WifiIndicator { get; set; } = true;
 
+    /// <summary>
+    /// Narrow, fingerprint-gated native Quick Access bootstrap over the persistent Steam UI host.
+    /// </summary>
+    public bool NativeQuickAccess { get; set; } = true;
+
     /// <summary>Automatic wake lock while the running Steam client reports an active
     /// download (polled over the CEF bridge), so the device finishes downloading
     /// instead of entering standby. The quick-access Power tab's manual Keep Awake
@@ -816,11 +904,25 @@ public sealed class CefConfig
 [JsonSerializable(typeof(SgdbLinkConfig))]
 [JsonSerializable(typeof(LaunchWrapperConfig))]
 [JsonSerializable(typeof(CardLibraryConfig))]
-[JsonSerializable(typeof(CategoryTabConfig))]
 [JsonSerializable(typeof(CustomTabConfig))]
 [JsonSerializable(typeof(NativeTabConfig))]
+[JsonSerializable(typeof(DeviceIntegrationConfig))]
+[JsonSerializable(typeof(DeviceDesiredProfile))]
+[JsonSerializable(typeof(DeviceCapabilityPreference))]
+[JsonSerializable(typeof(PluginSettingsScope))]
+// The SDK's own manifest types, so the cached declaration keeps one shape owned by the SDK rather
+// than a WSGM-side copy that would have to be kept in step with it.
+[JsonSerializable(typeof(PluginSettingsManifest))]
+[JsonSerializable(typeof(PluginSettingValue))]
+[JsonSerializable(typeof(DeviceAuthoredProfile))]
+[JsonSerializable(typeof(AuthoredCurvePoint))]
+[JsonSerializable(typeof(DeviceProfileSelection))]
+[JsonSerializable(typeof(DeviceApplicationProfileSelection))]
+[JsonSerializable(typeof(PerformanceConfig))]
+[JsonSerializable(typeof(PerformanceApplicationConfig))]
 [JsonSerializable(typeof(FilterNode))]
+[JsonSerializable(typeof(DeviceCoordinatorDiagnosticsSnapshot))]
 [JsonSourceGenerationOptions(WriteIndented = true, UseStringEnumConverter = true)]
-public partial class ConfigJsonContext : JsonSerializerContext
+internal partial class ConfigJsonContext : JsonSerializerContext
 {
 }

@@ -19,21 +19,30 @@
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="s:StartupAppRow">
                             <Border Classes="setting-row alt" Margin="0,0,0,3">
-                                <Grid ColumnDefinitions="Auto,*,180,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="6">
+                                <Grid ColumnDefinitions="Auto,*,Auto,180,Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="6">
                                     <ToggleSwitch Grid.Column="0" IsChecked="{Binding Enabled}" OnContent="" OffContent="" MinWidth="42" VerticalAlignment="Center" />
-                                    <TextBox Grid.Column="1" Text="{Binding Path}" PlaceholderText="Application path" />
-                                    <TextBox Grid.Column="2" Text="{Binding Args}" PlaceholderText="Arguments" />
-                                    <CheckBox Grid.Column="3" IsChecked="{Binding Elevated}" Content="Admin" VerticalAlignment="Center" />
-                                    <CheckBox Grid.Column="4" IsChecked="{Binding AutoRelaunch}" Content="Restart" VerticalAlignment="Center"
+                                    <TextBox Grid.Column="1" Text="{Binding Path}" MaxLength="32767" PlaceholderText="Application path" />
+                                    <Button Grid.Column="2" Classes="icon" Content="Aa" Width="44" Height="44"
+                                            Tag="Path" Click="OnEditStartupText" ToolTip.Tip="Edit path with controller"
+                                            AutomationProperties.Name="Edit startup application path with controller" />
+                                    <TextBox Grid.Column="3" Text="{Binding Args}" MaxLength="32767" PlaceholderText="Arguments" />
+                                    <Button Grid.Column="4" Classes="icon" Content="Aa" Width="44" Height="44"
+                                            Tag="Args" Click="OnEditStartupText" ToolTip.Tip="Edit arguments with controller"
+                                            AutomationProperties.Name="Edit startup arguments with controller" />
+                                    <CheckBox Grid.Column="5" IsChecked="{Binding Elevated}" Content="Admin" VerticalAlignment="Center" />
+                                    <CheckBox Grid.Column="6" IsChecked="{Binding AutoRelaunch}" Content="Restart" VerticalAlignment="Center"
                                               ToolTip.Tip="Relaunch this tool automatically if it exits or crashes" />
-                                    <Button Grid.Column="5" Classes="icon" Content="↑" ToolTip.Tip="Move up"
+                                    <Button Grid.Column="7" Classes="icon" Content="↑" ToolTip.Tip="Move up"
+                                            AutomationProperties.Name="Move startup application up"
                                             Command="{Binding $parent[ItemsControl].((s:SettingsViewModel)DataContext).MoveUpCommand}"
                                             CommandParameter="{Binding}" />
-                                    <Button Grid.Column="6" Classes="icon" Content="↓" ToolTip.Tip="Move down"
+                                    <Button Grid.Column="8" Classes="icon" Content="↓" ToolTip.Tip="Move down"
+                                            AutomationProperties.Name="Move startup application down"
                                             Command="{Binding $parent[ItemsControl].((s:SettingsViewModel)DataContext).MoveDownCommand}"
                                             CommandParameter="{Binding}" />
-                                    <Button Grid.Column="7" Content="Browse" Click="OnBrowseStartupApp" />
-                                    <Button Grid.Column="8" Classes="icon danger" Content="×" ToolTip.Tip="Remove"
+                                    <Button Grid.Column="9" Content="Browse" Click="OnBrowseStartupApp" />
+                                    <Button Grid.Column="10" Classes="icon danger" Content="×" ToolTip.Tip="Remove"
+                                            AutomationProperties.Name="Remove startup application"
                                             Command="{Binding $parent[ItemsControl].((s:SettingsViewModel)DataContext).RemoveAppCommand}"
                                             CommandParameter="{Binding}" />
                                 </Grid>

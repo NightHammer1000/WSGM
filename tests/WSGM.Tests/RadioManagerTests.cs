@@ -1,29 +1,35 @@
-using System.Runtime.InteropServices;
-using WSGM.Interop;
+using WindowsDeviceControl;
 using WSGM.Shell;
+using PairingOutcome = WindowsDeviceControl.WindowsRadio.PairingOutcome;
+using RadioPower = WindowsDeviceControl.WindowsRadio.Power;
+using WifiConnectionState = WindowsDeviceControl.WindowsRadio.WifiConnectionState;
+using WifiFailureKind = WindowsDeviceControl.WindowsRadio.WifiFailureKind;
+using WifiSecurity = WindowsDeviceControl.WindowsRadio.WifiSecurity;
 
 namespace WSGM.Tests;
 
 public class RadioManagerTests
 {
     [Theory]
-    [InlineData(RadioPower.Off, 0, "Off")]
-    [InlineData(RadioPower.Disabled, 0, "Blocked by Windows")]
-    [InlineData(RadioPower.Absent, 0, "No Wi-Fi adapter")]
-    [InlineData(RadioPower.Unknown, 0, "State unavailable")]
-    [InlineData(RadioPower.On, 0, "Connected")]
-    [InlineData(RadioPower.On, 1, "Connecting...")]
-    [InlineData(RadioPower.On, 2, "Not connected")]
+    [InlineData(RadioPower.Off, WifiConnectionState.Connected, "Off")]
+    [InlineData(RadioPower.Disabled, WifiConnectionState.Connected, "Blocked by Windows")]
+    [InlineData(RadioPower.Absent, WifiConnectionState.Connected, "No Wi-Fi adapter")]
+    [InlineData(RadioPower.Unknown, WifiConnectionState.Connected, "State unavailable")]
+    [InlineData(RadioPower.On, WifiConnectionState.Connected, "Connected")]
+    [InlineData(RadioPower.On, WifiConnectionState.Connecting, "Connecting...")]
+    [InlineData(RadioPower.On, WifiConnectionState.Disconnected, "Not connected")]
     public void WifiWordingCoversEveryRadioAndInterfaceState(
-        RadioPower power, int interfaceState, string expected)
-        => Assert.Equal(expected, RadioManager.DescribeWifi(power, interfaceState));
+        RadioPower power, WifiConnectionState state, string expected)
+        => Assert.Equal(expected, RadioManager.DescribeWifi(power, state));
 
     [Fact]
     public void APoweredOffWifiRadioNeverClaimsAConnection()
     {
         // The interface can still report "connected" for a moment after the radio
         // goes down; the radio state has to win or the tile lies.
-        Assert.Equal("Off", RadioManager.DescribeWifi(RadioPower.Off, 0));
+        Assert.Equal(
+            "Off",
+            RadioManager.DescribeWifi(RadioPower.Off, WifiConnectionState.Connected));
     }
 
     [Theory]
@@ -50,8 +56,9 @@ public class RadioManagerTests
     [Fact]
     public void OnlyARejectedKeyAsksTheUserToRetypeThePassword()
     {
-        // Verdict 1 is the wrong-password case.
-        Assert.Contains("password", RadioManager.DescribeConnectFailure(1, 0, ""));
+        Assert.Contains(
+            "password",
+            RadioManager.DescribeConnectFailure(WifiFailureKind.KeyRejected, 0, ""));
     }
 
     [Fact]
@@ -59,17 +66,20 @@ public class RadioManagerTests
     {
         // Re-prompting here would make the user retype a password that was never
         // even tried, which is worse than saying the network was not reachable.
-        var message = RadioManager.DescribeConnectFailure(3, 0, "");
+        var message = RadioManager.DescribeConnectFailure(WifiFailureKind.Unreachable, 0, "");
         Assert.DoesNotContain("password", message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("range", message);
     }
 
     [Fact]
-    public void AnUnknownFailureFallsBackToTheHelpersOwnMessage()
+    public void AnUnknownFailureFallsBackToWindowsMessage()
     {
-        Assert.Equal("boom", RadioManager.DescribeConnectFailure(4, 0, "boom"));
+        Assert.Equal(
+            "boom",
+            RadioManager.DescribeConnectFailure(WifiFailureKind.Unknown, 0, "boom"));
         // ...and still says something when there is no message at all.
-        Assert.False(string.IsNullOrWhiteSpace(RadioManager.DescribeConnectFailure(4, 0, "")));
+        Assert.False(string.IsNullOrWhiteSpace(
+            RadioManager.DescribeConnectFailure(WifiFailureKind.Unknown, 0, "")));
     }
 
     [Fact]
@@ -85,143 +95,114 @@ public class RadioManagerTests
     }
 
     [Theory]
-    [InlineData(0, "Pad is paired.")]
-    [InlineData(1, "Pad was already paired.")]
-    [InlineData(2, "Pairing with Pad was cancelled.")]
-    public void PairOutcomeWordingNamesTheDevice(int outcome, string expected)
+    [InlineData(PairingOutcome.Paired, "Pad is paired.")]
+    [InlineData(PairingOutcome.AlreadyPaired, "Pad was already paired.")]
+    [InlineData(PairingOutcome.Cancelled, "Pairing with Pad was cancelled.")]
+    public void PairOutcomeWordingNamesTheDevice(PairingOutcome outcome, string expected)
         => Assert.Equal(expected, RadioManager.DescribePairOutcome(outcome, "Pad", ""));
 
     [Fact]
     public void AFailedPairingSuggestsPairingMode()
-        => Assert.Contains("pairing mode", RadioManager.DescribePairOutcome(3, "Pad", ""));
+        => Assert.Contains(
+            "pairing mode",
+            RadioManager.DescribePairOutcome(PairingOutcome.Failed, "Pad", ""));
 
     [Fact]
-    public void AStartupErrorUsesTheHelpersMessageWhenThereIsOne()
+    public void AStartupErrorUsesTheWindowsMessageWhenThereIsOne()
     {
-        Assert.Equal("no such device", RadioManager.DescribePairOutcome(-1, "Pad", "no such device"));
-        Assert.Contains("Pad", RadioManager.DescribePairOutcome(-1, "Pad", ""));
-    }
-
-    // ---- ABI record layouts ----
-    //
-    // These decode a buffer built here to the layout the Rust side declares. If
-    // either side's field order or padding drifts, the SSID or device id would
-    // come back as garbage at runtime with no compiler error anywhere.
-
-    [Fact]
-    public void AWifiRecordDecodesEveryFieldFromItsDeclaredOffsets()
-    {
-        var buffer = Marshal.AllocHGlobal(NativeRadio.WifiRecordSize);
-        try
-        {
-            Zero(buffer, NativeRadio.WifiRecordSize);
-            WriteUtf16(buffer, 0, "Cafe");
-            Marshal.WriteInt32(buffer, 128, 73); // signal
-            Marshal.WriteInt32(buffer, 132, 1); // security: pre-shared key
-            Marshal.WriteInt32(buffer, 136, 1); // saved
-            Marshal.WriteInt32(buffer, 140, 0); // connectable
-            Marshal.WriteInt32(buffer, 144, 1); // connected
-
-            var network = NativeRadio.ReadWifiNetwork(buffer);
-            Assert.Equal("Cafe", network.Ssid);
-            Assert.Equal(73, network.Signal);
-            Assert.Equal(1, network.Security);
-            Assert.True(network.Saved);
-            Assert.False(network.Connectable);
-            Assert.True(network.Connected);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+        // A null outcome is the attempt that threw before Windows produced one.
+        Assert.Equal("no such device", RadioManager.DescribePairOutcome(null, "Pad", "no such device"));
+        Assert.Contains("Pad", RadioManager.DescribePairOutcome(null, "Pad", ""));
     }
 
     [Fact]
-    public void ABluetoothRecordDecodesItsTwoStringFieldsIndependently()
-    {
-        var buffer = Marshal.AllocHGlobal(NativeRadio.BluetoothRecordSize);
-        try
-        {
-            Zero(buffer, NativeRadio.BluetoothRecordSize);
-            WriteUtf16(buffer, 0, "BT#abc");
-            WriteUtf16(buffer, 512, "WH-1000XM5");
-            Marshal.WriteInt32(buffer, 768, 1); // paired
-            Marshal.WriteInt32(buffer, 772, 0); // can pair
-            Marshal.WriteInt32(buffer, 776, 1); // connected
-            WriteUtf16(buffer, 780, "8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c");
+    public void OneLiveRadioWinsTheAggregateState()
+        => Assert.Equal(
+            WindowsRadio.Power.On,
+            WindowsRadio.AggregatePower([WindowsRadio.Power.Off, WindowsRadio.Power.On]));
 
-            var device = NativeRadio.ReadBluetoothDevice(buffer);
-            Assert.Equal("BT#abc", device.Id);
-            Assert.Equal("WH-1000XM5", device.Name);
-            Assert.True(device.Paired);
-            Assert.False(device.CanPair);
-            Assert.True(device.Connected);
-            Assert.Equal("8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c", device.Container);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+    [Fact]
+    public void NoRadioIsReportedAsAbsent()
+        => Assert.Equal(WindowsRadio.Power.Absent, WindowsRadio.AggregatePower([]));
+
+    [Theory]
+    [InlineData(294932u, WifiFailureKind.KeyRejected)] // MSMSEC_PSK_MISMATCH_SUSPECTED
+    [InlineData(262148u, WifiFailureKind.SecurityMismatch)] // MSMSEC_PROFILE_PSK_LENGTH
+    [InlineData(196614u, WifiFailureKind.Unreachable)] // any MSM association failure
+    [InlineData(1u, WifiFailureKind.Unknown)]
+    public void WlanReasonFamiliesKeepPasswordAndReachabilityFailuresDistinct(
+        uint reason,
+        WifiFailureKind expected)
+        => Assert.Equal(expected, WindowsRadio.GetReasonVerdict(reason));
+
+    [Fact]
+    public void ARawPskUsesTheNetworkKeyProfileShape()
+    {
+        var xml = WifiProfile.CreatePsk(
+            "Cafe", "Cafe", "Cafe"u8.ToArray(), string.Concat(Enumerable.Repeat("a1B2", 16)),
+            WifiProfile.PskFlavor.Wpa3Transition);
+        Assert.Contains("<keyType>networkKey</keyType>", xml);
+        Assert.Contains("profile/v4", xml);
     }
 
     [Fact]
-    public void AnUnterminatedStringFieldStopsAtTheFieldEdge()
+    public void AProfileRoundTripsEscapedAndHexSsids()
     {
-        // The helper clips rather than failing, so the last unit can be non-NUL
-        // only if something went wrong upstream — reading past it would walk into
-        // the next field.
-        const int units = 4;
-        var buffer = Marshal.AllocHGlobal(units * 2);
-        try
-        {
-            for (var i = 0; i < units; i++)
-            {
-                Marshal.WriteInt16(buffer, i * 2, 'x');
-            }
-            Assert.Equal("xxxx", NativeRadio.ReadFixedString(buffer, 0, units));
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+        var escaped = WifiProfile.CreateOpen("A&B", "A&B", "A&B"u8.ToArray(), false);
+        Assert.Equal("A&B"u8.ToArray(), WifiProfile.TryReadSsid(escaped));
+
+        var raw = new byte[] { 0x41, 0xff, 0x42 };
+        var hex = WifiProfile.CreatePsk(
+            "A?B", "A?B", raw, "password1", WifiProfile.PskFlavor.Wpa2Aes);
+        Assert.Equal(raw, WifiProfile.TryReadSsid(hex));
     }
 
     [Fact]
-    public void AnEmptyStringFieldDecodesToEmptyRatherThanNull()
+    public void ProfileAuthoringPreservesEveryWindowsSpecificShape()
     {
-        var buffer = Marshal.AllocHGlobal(8);
-        try
-        {
-            Zero(buffer, 8);
-            Assert.Equal("", NativeRadio.ReadFixedString(buffer, 0, 4));
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+        var escaped = WifiProfile.CreatePsk(
+            "A&B<C>",
+            "A&B<C>",
+            "A&B<C>"u8.ToArray(),
+            "pw\"&<>'x",
+            WifiProfile.PskFlavor.Wpa3Transition);
+        Assert.Contains("<name>A&amp;B&lt;C&gt;</name>", escaped);
+        Assert.Contains("<keyMaterial>pw&quot;&amp;&lt;&gt;&apos;x</keyMaterial>", escaped);
+        Assert.Contains(
+            "<transitionMode xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v4\">true</transitionMode>",
+            escaped);
+
+        var enhancedOpen = WifiProfile.CreateOpen("Cafe", "Cafe", "Cafe"u8.ToArray(), true);
+        Assert.Contains("<authentication>OWE</authentication>", enhancedOpen);
+        Assert.DoesNotContain("<encryption>none</encryption>", enhancedOpen);
+
+        var legacy = WifiProfile.CreatePsk(
+            "Old", "Old", "Old"u8.ToArray(), "password1", WifiProfile.PskFlavor.WpaTkip);
+        Assert.Contains("<authentication>WPAPSK</authentication>", legacy);
+        Assert.Contains("<encryption>TKIP</encryption>", legacy);
     }
 
     [Fact]
-    public void TheRecordSizesMatchTheRustDeclarations()
+    public void AProfileNameNeverReplacesTheNetworkIdentity()
     {
-        // ssid[64] + 5 ints; id[256] + name[128] + 3 ints + container[40];
-        // container[40] + 1 int.
-        Assert.Equal(148, NativeRadio.WifiRecordSize);
-        Assert.Equal(860, NativeRadio.BluetoothRecordSize);
-        Assert.Equal(84, NativeRadio.BluetoothAudioRecordSize);
+        var xml = WifiProfile.CreatePsk(
+            "Cafe 2", " Cafe ", " Cafe "u8.ToArray(), "password1",
+            WifiProfile.PskFlavor.Wpa2Aes);
+        Assert.Contains("<name>Cafe 2</name>", xml);
+        Assert.Equal(" Cafe "u8.ToArray(), WifiProfile.TryReadSsid(xml));
+        Assert.Null(WifiProfile.TryReadSsid("<WLANProfile />"));
+        Assert.Null(WifiProfile.TryReadSsid(
+            "<SSIDConfig><SSID><hex>ABC</hex></SSID></SSIDConfig>"));
     }
 
-    private static void Zero(nint buffer, int bytes)
-        => Marshal.Copy(new byte[bytes], 0, buffer, bytes);
-
-    private static void WriteUtf16(nint buffer, int offset, string value)
-    {
-        for (var i = 0; i < value.Length; i++)
-        {
-            Marshal.WriteInt16(buffer, offset + (i * 2), value[i]);
-        }
-        Marshal.WriteInt16(buffer, offset + (value.Length * 2), 0);
-    }
+    [Theory]
+    [InlineData("short", false)]
+    [InlineData("12345678", true)]
+    [InlineData("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", false)]
+    [InlineData("pass\tword", false)]
+    [InlineData("pässword", false)]
+    public void PassphraseValidationUses80211Bounds(string passphrase, bool expected)
+        => Assert.Equal(expected, WifiProfile.PassphraseIsValid(passphrase));
 }
 
 public class RadioEntryTests
@@ -229,7 +210,7 @@ public class RadioEntryTests
     [Fact]
     public void ASecuredNetworkWithoutASavedProfileAsksForAPassword()
     {
-        var entry = new WifiNetworkEntry("Cafe") { Security = WifiSecurity.Personal };
+        var entry = new WifiNetworkEntry("Cafe") { Security = WifiSecurity.PersonalPsk };
         Assert.True(entry.NeedsPassword);
     }
 
@@ -238,7 +219,7 @@ public class RadioEntryTests
     {
         var entry = new WifiNetworkEntry("Cafe")
         {
-            Security = WifiSecurity.Personal,
+            Security = WifiSecurity.PersonalPsk,
             Saved = true,
         };
         Assert.False(entry.NeedsPassword);
@@ -254,7 +235,7 @@ public class RadioEntryTests
     [Fact]
     public void NeedsPasswordRaisesChangeNotificationWhenTheSavedFlagFlips()
     {
-        var entry = new WifiNetworkEntry("Cafe") { Security = WifiSecurity.Personal };
+        var entry = new WifiNetworkEntry("Cafe") { Security = WifiSecurity.PersonalPsk };
         var raised = new List<string?>();
         entry.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
 

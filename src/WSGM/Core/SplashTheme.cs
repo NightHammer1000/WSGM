@@ -92,7 +92,7 @@ internal static class SplashTheme
         {
             Log.Warn($"Splash theme export to '{path}' failed: {ex.Message}");
         }
-        TryDeleteFile(tempPath);
+        SplashAssets.TryDelete(tempPath);
         return false;
     }
 
@@ -114,7 +114,7 @@ internal static class SplashTheme
 
             // The bundled copy gets its image paths rewritten to the archive entry
             // names; the caller's instance is never mutated.
-            var bundled = Clone(splash);
+            var bundled = ConfigStore.CloneJson(splash, ConfigJsonContext.Default.SplashConfig);
             using var archive = new ZipArchive(destination, ZipArchiveMode.Create, leaveOpen: true);
             bundled.LogoImagePath = BundleImage(archive, splash.LogoImagePath, LogoEntryBaseName);
             bundled.BackgroundImagePath = BundleImage(archive, splash.BackgroundImagePath, BackgroundEntryBaseName);
@@ -280,15 +280,10 @@ internal static class SplashTheme
                 return null;
             }
 
-            // Same explicit-null repairs a loaded config.json gets — the archive
-            // contents are untrusted.
+            // Apply the same explicit-null repairs as a loaded config.json.
             ConfigStore.NormalizeSplash(splash);
-            // Rule for every path-like field: a path out of the archive's JSON is
-            // NEVER passed through — absolute, relative or UNC alike. It may only
-            // ever be a file this import actually staged, or "" when the archive
-            // bundled no such entry. The caller thumbnails these paths immediately,
-            // so a pass-through would make a shared theme reach out to e.g.
-            // \\attacker\share\x.png with no user action.
+            // Archive paths never escape the import transaction: only files staged by this import
+            // are returned, or an empty path when the archive omits the image.
             splash.LogoImagePath = ExtractImage(archive, LogoEntryBaseName, targetImageDirectory, extractedFiles) ?? "";
             splash.BackgroundImagePath =
                 ExtractImage(archive, BackgroundEntryBaseName, targetImageDirectory, extractedFiles) ?? "";
@@ -495,7 +490,7 @@ internal static class SplashTheme
             }
             foreach (var file in extractedFiles)
             {
-                TryDeleteFile(file);
+                SplashAssets.TryDelete(file);
             }
         }
         catch
@@ -781,18 +776,6 @@ internal static class SplashTheme
         }
     }
 
-    private static void TryDeleteFile(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch
-        {
-            // Best effort.
-        }
-    }
-
     private static ZipArchiveEntry? FindConfigEntry(ZipArchive archive)
     {
         foreach (var entry in archive.Entries)
@@ -803,11 +786,5 @@ internal static class SplashTheme
             }
         }
         return null;
-    }
-
-    private static SplashConfig Clone(SplashConfig splash)
-    {
-        var json = JsonSerializer.Serialize(splash, ConfigJsonContext.Default.SplashConfig);
-        return JsonSerializer.Deserialize(json, ConfigJsonContext.Default.SplashConfig) ?? new SplashConfig();
     }
 }

@@ -3,6 +3,9 @@
     <Nullable>enable</Nullable>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Builds are deterministic and offline-capable; dependency alerts run in GitHub instead of
+         turning an unavailable NuGet advisory endpoint into a compiler failure. -->
+    <NuGetAudit>false</NuGetAudit>
     <!-- Avalonia's compiled-XAML loader advisory is a deliberate runtime loading
          pattern; XML documentation warnings remain enabled for every public API. -->
     <NoWarn>$(NoWarn);AVLN3001</NoWarn>

@@ -10,10 +10,6 @@
         </ResourceDictionary>
     </Styles.Resources>
 
-    <Style Selector="TextBlock.page-title">
-        <Setter Property="FontSize" Value="20" />
-        <Setter Property="FontWeight" Value="SemiBold" />
-    </Style>
     <Style Selector="TextBlock.caption">
         <Setter Property="FontSize" Value="12" />
         <Setter Property="Foreground" Value="{StaticResource HcTextSecondaryBrush}" />

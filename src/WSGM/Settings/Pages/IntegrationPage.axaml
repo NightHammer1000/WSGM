@@ -5,10 +5,9 @@
              x:Class="WSGM.Settings.Pages.IntegrationPage"
              x:DataType="s:SettingsViewModel">
     <!-- Everything WSGM injects into the running Steam client over its debug
-         port. Split off the Steam page in the review round after the seventh
-         toggle: two sections on that page no longer fit the 1024x640 layout
-         floor, and a page that stops fitting earns its own tab. Keep new CEF
-         features here rather than growing another page's column. -->
+         port. A page that stops fitting the 1024x640 layout floor earns its own
+         tab — keep new CEF features here rather than growing another page's
+         column. -->
     <Border Padding="16,10,16,10">
         <Grid ColumnDefinitions="*,24,*">
             <StackPanel Grid.Column="0">
@@ -55,6 +54,87 @@
                         <ToggleSwitch Grid.Column="1" IsChecked="{Binding CefSdFormat}" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
+
+                <Border Classes="section-header">
+                    <TextBlock Text="PERFORMANCE" />
+                </Border>
+                <Border Classes="setting-row alt">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="RTSS performance controls" Classes="setting-title" />
+                            <TextBlock Text="Use the verified RTSS profile API for the shared frame limiter in the overlay and native Quick Access. RTSS remains optional and independently installed." Classes="caption" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding PerformanceEnabled}" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="Frame limit and refresh rate" Classes="setting-title" />
+                            <TextBlock Text="How a frame cap is paired with the panel. Frame limit only never changes the display. Native refresh modes switch only between the rates the panel advertises. Frame doubling picks the lowest rate the driver accepts that is an exact multiple of the cap, so 40 FPS runs the panel at 80 Hz." Classes="caption" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ComboBox Grid.Column="1" Width="230" VerticalAlignment="Center" SelectedIndex="{Binding FrameLimitStrategyIndex}">
+                            <ComboBoxItem Content="Frame limit only" />
+                            <ComboBoxItem Content="Native refresh modes" />
+                            <ComboBoxItem Content="Frame doubling" />
+                        </ComboBox>
+                    </Grid>
+                </Border>
+
+                <Border Classes="section-header" IsVisible="{Binding PerformanceEnabled}">
+                    <TextBlock Text="CUSTOM OVERLAY (LEVEL 4)" />
+                </Border>
+                <Border Classes="setting-row alt" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="Widget order" Classes="setting-title" />
+                            <TextBlock Text="Rows of the Quick Access overlay selector's Custom level, top to bottom. Names: Time, GPU, CPU, VRAM, RAM, BATT, FPS; unknown names are ignored." Classes="caption" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <TextBox Grid.Column="1" Width="230" VerticalAlignment="Center" Text="{Binding OsdCustomOrder}" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="Clock" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="230" VerticalAlignment="Center" ItemsSource="{Binding OsdCustomLevels}" SelectedIndex="{Binding OsdCustomTimeIndex}" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row alt" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="Framerate" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="230" VerticalAlignment="Center" ItemsSource="{Binding OsdCustomLevels}" SelectedIndex="{Binding OsdCustomFpsIndex}" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="CPU" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="230" VerticalAlignment="Center" ItemsSource="{Binding OsdCustomLevels}" SelectedIndex="{Binding OsdCustomCpuIndex}" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row alt" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="GPU" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="230" VerticalAlignment="Center" ItemsSource="{Binding OsdCustomLevels}" SelectedIndex="{Binding OsdCustomGpuIndex}" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="Memory" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="230" VerticalAlignment="Center" ItemsSource="{Binding OsdCustomLevels}" SelectedIndex="{Binding OsdCustomRamIndex}" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row alt" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="Video memory" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="230" VerticalAlignment="Center" ItemsSource="{Binding OsdCustomLevels}" SelectedIndex="{Binding OsdCustomVramIndex}" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row" IsVisible="{Binding PerformanceEnabled}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Text="Battery" Classes="setting-title" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Width="230" VerticalAlignment="Center" ItemsSource="{Binding OsdCustomLevels}" SelectedIndex="{Binding OsdCustomBatteryIndex}" />
+                    </Grid>
+                </Border>
             </StackPanel>
 
             <StackPanel Grid.Column="2" IsVisible="{Binding CefEnabled}">
@@ -82,13 +162,22 @@
                 <Border Classes="setting-row alt">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                         <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="Native Quick Access bridge" Classes="setting-title" />
+                            <TextBlock Text="Use the fingerprint-gated persistent Steam UI host. An incompatible Steam build stays untouched." Classes="caption" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding CefNativeQuickAccess}" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+                <Border Classes="setting-row">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
                             <TextBlock Text="Keep awake during downloads" Classes="setting-title" />
                             <TextBlock Text="Hold a wake lock while Steam downloads, so standby cannot interrupt them." Classes="caption" TextWrapping="Wrap" />
                         </StackPanel>
                         <ToggleSwitch Grid.Column="1" IsChecked="{Binding CefDownloadKeepAwake}" VerticalAlignment="Center" />
                     </Grid>
                 </Border>
-                <Border Classes="setting-row">
+                <Border Classes="setting-row alt">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                         <StackPanel VerticalAlignment="Center" Spacing="1">
                             <TextBlock Text="Download queue sorting" Classes="setting-title" />

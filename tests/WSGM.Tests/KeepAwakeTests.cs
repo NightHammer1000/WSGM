@@ -1,15 +1,16 @@
 using WSGM.Core;
+using WSGM.Shell;
 
 namespace WSGM.Tests;
 
 public sealed class KeepAwakeTests
 {
-    // ---- KeepAwakeDecider: hold/release policy ----
+    // ---- KeepAwakeService.NextDownloadHold: hold/release policy ----
 
     [Fact]
     public void FirstActiveSampleAcquiresImmediately()
     {
-        var (hold, streak) = KeepAwakeDecider.Next(currentHold: false, inactiveStreak: 0, sampleActive: true);
+        var (hold, streak) = KeepAwakeService.NextDownloadHold(currentHold: false, inactiveStreak: 0, sampleActive: true);
 
         Assert.True(hold);
         Assert.Equal(0, streak);
@@ -18,7 +19,7 @@ public sealed class KeepAwakeTests
     [Fact]
     public void ActiveSampleResetsAnExistingInactiveStreak()
     {
-        var (hold, streak) = KeepAwakeDecider.Next(currentHold: true, inactiveStreak: 1, sampleActive: true);
+        var (hold, streak) = KeepAwakeService.NextDownloadHold(currentHold: true, inactiveStreak: 1, sampleActive: true);
 
         Assert.True(hold);
         Assert.Equal(0, streak);
@@ -27,7 +28,7 @@ public sealed class KeepAwakeTests
     [Fact]
     public void SingleInactivePollKeepsTheHold()
     {
-        var (hold, streak) = KeepAwakeDecider.Next(currentHold: true, inactiveStreak: 0, sampleActive: false);
+        var (hold, streak) = KeepAwakeService.NextDownloadHold(currentHold: true, inactiveStreak: 0, sampleActive: false);
 
         Assert.True(hold);
         Assert.Equal(1, streak);
@@ -36,11 +37,11 @@ public sealed class KeepAwakeTests
     [Fact]
     public void ConsecutiveInactivePollsReleaseTheHold()
     {
-        var (hold1, streak1) = KeepAwakeDecider.Next(currentHold: true, inactiveStreak: 0, sampleActive: false);
-        var (hold2, streak2) = KeepAwakeDecider.Next(hold1, streak1, sampleActive: false);
+        var (hold1, streak1) = KeepAwakeService.NextDownloadHold(currentHold: true, inactiveStreak: 0, sampleActive: false);
+        var (hold2, streak2) = KeepAwakeService.NextDownloadHold(hold1, streak1, sampleActive: false);
 
         Assert.False(hold2);
-        Assert.Equal(KeepAwakeDecider.ReleaseAfterInactivePolls, streak2);
+        Assert.Equal(KeepAwakeService.ReleaseAfterInactivePolls, streak2);
     }
 
     [Fact]
@@ -49,21 +50,21 @@ public sealed class KeepAwakeTests
         var state = (Hold: false, InactiveStreak: 0);
         for (var i = 0; i < 5; i++)
         {
-            state = KeepAwakeDecider.Next(state.Hold, state.InactiveStreak, sampleActive: false);
+            state = KeepAwakeService.NextDownloadHold(state.Hold, state.InactiveStreak, sampleActive: false);
             Assert.False(state.Hold);
         }
 
         // The streak is capped, so an arbitrarily long idle phase cannot overflow it.
-        Assert.Equal(KeepAwakeDecider.ReleaseAfterInactivePolls, state.InactiveStreak);
+        Assert.Equal(KeepAwakeService.ReleaseAfterInactivePolls, state.InactiveStreak);
     }
 
     [Fact]
     public void HoldReacquiresAfterAReleaseWhenActivityResumes()
     {
-        var state = KeepAwakeDecider.Next(currentHold: true, inactiveStreak: 1, sampleActive: false);
+        var state = KeepAwakeService.NextDownloadHold(currentHold: true, inactiveStreak: 1, sampleActive: false);
         Assert.False(state.Hold);
 
-        state = KeepAwakeDecider.Next(state.Hold, state.InactiveStreak, sampleActive: true);
+        state = KeepAwakeService.NextDownloadHold(state.Hold, state.InactiveStreak, sampleActive: true);
 
         Assert.True(state.Hold);
         Assert.Equal(0, state.InactiveStreak);

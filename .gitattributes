@@ -1,0 +1,9 @@
+# Patch files must keep LF endings. `git apply` and `patch` compare line content byte for byte, so a
+# CRLF-converted patch fails to apply against an LF upstream tree — which is every tree these target.
+*.patch -text diff=diff
+*.diff -text diff=diff
+
+# The embedded Steam UI asset is hashed from repository bytes. Pin source and generated output to
+# LF so the hash is identical on autocrlf and non-autocrlf checkouts.
+src/WSGM/Core/SteamUiAssets/*.js text eol=lf
+src/WSGM/Core/SteamUiAssets/Source/**/*.ts text eol=lf

@@ -11,6 +11,15 @@ public sealed class SplashAssetsTests : IDisposable
     private string SourceDir => Path.Combine(_root, "source");
     private string TargetDir => Path.Combine(_root, "target");
 
+    /// <summary>Prepare plus an immediate commit. Production never does this — the save path
+    /// commits only after the config write succeeds — so the convenience belongs here rather
+    /// than on <see cref="SplashAssets"/>.</summary>
+    private static void Materialize(SplashConfig splash, string targetDirectory)
+    {
+        using SplashAssets.Transaction staged = SplashAssets.Prepare(splash, targetDirectory);
+        staged.Commit();
+    }
+
     public SplashAssetsTests()
     {
         System.IO.Directory.CreateDirectory(SourceDir);
@@ -54,7 +63,7 @@ public sealed class SplashAssetsTests : IDisposable
             BackgroundImagePath = WriteSource("wallpaper.JPG", "bg-bytes"),
         };
 
-        SplashAssets.Materialize(splash, TargetDir);
+        Materialize(splash, TargetDir);
 
         Assert.Equal(Path.Combine(TargetDir, "logo.png"), splash.LogoImagePath);
         Assert.Equal(Path.Combine(TargetDir, "background.JPG"), splash.BackgroundImagePath);
@@ -70,7 +79,7 @@ public sealed class SplashAssetsTests : IDisposable
         File.WriteAllText(Path.Combine(TargetDir, "unrelated.bmp"), "not-a-slot-file");
         var splash = new SplashConfig { LogoImagePath = WriteSource("new.png", "new-png") };
 
-        SplashAssets.Materialize(splash, TargetDir);
+        Materialize(splash, TargetDir);
 
         Assert.Equal(Path.Combine(TargetDir, "logo.png"), splash.LogoImagePath);
         Assert.Equal("new-png", File.ReadAllText(splash.LogoImagePath));
@@ -86,7 +95,7 @@ public sealed class SplashAssetsTests : IDisposable
         File.WriteAllText(Path.Combine(TargetDir, "background.jpg"), "stale");
         var splash = new SplashConfig { LogoImagePath = "", BackgroundImagePath = "" };
 
-        SplashAssets.Materialize(splash, TargetDir);
+        Materialize(splash, TargetDir);
 
         Assert.Equal("", splash.LogoImagePath);
         Assert.Equal("", splash.BackgroundImagePath);
@@ -97,11 +106,11 @@ public sealed class SplashAssetsTests : IDisposable
     public void MaterializeLeavesPathsAlreadyInsideTheTargetDirectoryUntouched()
     {
         var splash = new SplashConfig { LogoImagePath = WriteSource("logo.png", "logo-bytes") };
-        SplashAssets.Materialize(splash, TargetDir);
+        Materialize(splash, TargetDir);
         var materialized = splash.LogoImagePath;
         var writeTime = File.GetLastWriteTimeUtc(materialized);
 
-        SplashAssets.Materialize(splash, TargetDir);
+        Materialize(splash, TargetDir);
 
         Assert.Equal(materialized, splash.LogoImagePath);
         Assert.Equal(writeTime, File.GetLastWriteTimeUtc(materialized));
@@ -116,7 +125,7 @@ public sealed class SplashAssetsTests : IDisposable
         // emptying the folder) stayed in config.json and was re-persisted by every
         // later save, forever naming a file that is not there.
         var splash = new SplashConfig { LogoImagePath = WriteSource("logo.png", "logo-bytes") };
-        SplashAssets.Materialize(splash, TargetDir);
+        Materialize(splash, TargetDir);
         File.Delete(splash.LogoImagePath);
 
         using var staged = SplashAssets.Prepare(splash, TargetDir);
@@ -136,7 +145,7 @@ public sealed class SplashAssetsTests : IDisposable
         // pick then deleted "logo.png" as a stale sibling, so the saved config named a
         // deleted file and nothing was reported.
         var first = new SplashConfig { LogoImagePath = WriteSource("first.png", "first-logo") };
-        SplashAssets.Materialize(first, TargetDir);
+        Materialize(first, TargetDir);
         var logoCopy = Path.Combine(TargetDir, "logo.png");
 
         var second = new SplashConfig
@@ -179,7 +188,7 @@ public sealed class SplashAssetsTests : IDisposable
             BackgroundImagePath = WriteSource("bg.png", "bg-bytes"),
         };
 
-        SplashAssets.Materialize(splash, TargetDir);
+        Materialize(splash, TargetDir);
 
         Assert.Equal(missing, splash.LogoImagePath);
         Assert.False(File.Exists(Path.Combine(TargetDir, "logo.png")));
@@ -192,7 +201,7 @@ public sealed class SplashAssetsTests : IDisposable
         var freshTarget = Path.Combine(_root, "fresh", "splash");
         var splash = new SplashConfig { BackgroundImagePath = WriteSource("bg.webp", "bg-bytes") };
 
-        SplashAssets.Materialize(splash, freshTarget);
+        Materialize(splash, freshTarget);
 
         Assert.Equal(Path.Combine(freshTarget, "background.webp"), splash.BackgroundImagePath);
         Assert.Equal("bg-bytes", File.ReadAllText(splash.BackgroundImagePath));
@@ -218,7 +227,7 @@ public sealed class SplashAssetsTests : IDisposable
             LogoImagePath = WriteSource("first.png", "first-logo"),
             BackgroundImagePath = WriteSource("first-bg.png", "first-bg"),
         };
-        SplashAssets.Materialize(first, TargetDir);
+        Materialize(first, TargetDir);
         var liveFiles = System.IO.Directory.GetFiles(TargetDir).OrderBy(f => f).ToArray();
 
         // A save whose config write fails: stage, then roll back.

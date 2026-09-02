@@ -52,13 +52,13 @@ internal static class ScheduledTaskLauncher
         }
     }
 
-    internal static void Delete(string? taskName)
+    internal static bool Delete(string? taskName)
     {
         if (string.IsNullOrEmpty(taskName))
         {
-            return;
+            return true;
         }
-        _ = RunSchtasks(["/Delete", "/TN", taskName, "/F"], logFailure: false);
+        return RunSchtasks(["/Delete", "/TN", taskName, "/F"]);
     }
 
     internal static string BuildTaskXml(string executablePath, string pipeName)
@@ -112,11 +112,41 @@ internal static class ScheduledTaskLauncher
             }
 
             using var process = Process.Start(startInfo);
-            if (process is null || !process.WaitForExit(15_000) || process.ExitCode != 0)
+            if (process is null)
             {
                 if (logFailure)
                 {
-                    LaunchLog.Error($"schtasks {arguments[0]} failed or timed out.");
+                    LaunchLog.Error($"schtasks {arguments[0]} did not start.");
+                }
+                return false;
+            }
+
+            if (!process.WaitForExit(15_000))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    _ = process.WaitForExit(5_000);
+                }
+                catch (Exception ex)
+                {
+                    LaunchLog.Error(
+                        $"Could not stop timed-out schtasks {arguments[0]}: {ex.Message}");
+                }
+
+                if (logFailure)
+                {
+                    LaunchLog.Error($"schtasks {arguments[0]} timed out and was terminated.");
+                }
+                return false;
+            }
+
+            if (process.ExitCode != 0)
+            {
+                if (logFailure)
+                {
+                    LaunchLog.Error(
+                        $"schtasks {arguments[0]} exited with code {process.ExitCode}.");
                 }
                 return false;
             }

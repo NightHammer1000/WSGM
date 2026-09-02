@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Avalonia.Controls;
-using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -23,11 +22,9 @@ namespace WSGM.Overlay;
 /// image bytes are fetched and base64-encoded in C#. Self-drawing (no XAML), every
 /// interactive element a <see cref="Button"/> so D-pad/A/B work with no extra
 /// plumbing.</summary>
-public sealed class ArtworkView : UserControl
+public sealed class ArtworkView : OverlaySubView
 {
     private static readonly System.Threading.SemaphoreSlim ThumbnailGate = new(4, 4);
-    private readonly Stack<Action> _stack = new();
-    private Action? _current;
 
     private long _appId;
     private string _appName = "";
@@ -38,29 +35,25 @@ public sealed class ArtworkView : UserControl
     // instead of the target's Steam app id — needed for non-Steam shortcuts / ROMs and
     // when the auto-detected game is wrong. The art still APPLIES to _appId.
     private int _sgdbGameId;
-    private int _generation;
-
-    // One-shot message shown at the top of the next overview render (apply outcome).
-    private string? _notice;
 
     // Remembered shortcut → SGDB game associations, snapshotted from config on open
     // and updated on every match pick, so a shortcut is clarified once, not per visit.
     private readonly Dictionary<long, (int Id, string Name)> _sgdbLinks = new();
 
-    /// <summary>Raised when the user backs out of the top level.</summary>
-    public event Action? CloseRequested;
+    /// <inheritdoc />
+    protected override string LogScope => "Artwork";
 
     /// <summary>Loads config, detects the current game, and opens the picker.</summary>
     public void Open() => _ = RunSafelyAsync(OpenAsync(), "open");
 
     private async Task OpenAsync()
     {
-        var generation = ++_generation;
+        var generation = ++_navigationGeneration;
         _stack.Clear();
         _current = null;
         _sgdbGameId = 0;
         var config = await Task.Run(LibraryTabManager.LoadConfig);
-        if (generation != _generation) { return; }
+        if (generation != _navigationGeneration) { return; }
         _apiKey = SteamGridDb.ResolveKey(config);
         _sgdbLinks.Clear();
         foreach (var link in config.SgdbLinks.Where(l => l.SgdbGameId > 0))
@@ -75,11 +68,11 @@ public sealed class ArtworkView : UserControl
 
         Navigate(() => RenderMessage("Change Artwork", "Detecting the game you're viewing…"));
         // Navigate invalidates the previous level, so re-snapshot for the awaits below.
-        generation = _generation;
+        generation = _navigationGeneration;
         try
         {
             _appId = await SteamPageBridge.GetCurrentAppIdAsync();
-            if (generation != _generation)
+            if (generation != _navigationGeneration)
             {
                 return;
             }
@@ -93,7 +86,7 @@ public sealed class ArtworkView : UserControl
         if (_appId > 0)
         {
             _games ??= await SafeGamesAsync();
-            if (generation != _generation)
+            if (generation != _navigationGeneration)
             {
                 return;
             }
@@ -123,42 +116,10 @@ public sealed class ArtworkView : UserControl
         }
     }
 
-    /// <summary>Invalidates outstanding work when the host hides this view.</summary>
-    public void Close() => _generation++;
-
-    /// <summary>Handles Back/B: pops one level or requests close at the top.</summary>
-    public bool Back()
-    {
-        // Same contract as OverlaySubView: leaving a level invalidates its
-        // outstanding loads, so an abandoned grid stops downloading and its
-        // decoded bitmaps are dropped instead of landing on a detached Image.
-        _generation++;
-        if (_stack.Count == 0)
-        {
-            CloseRequested?.Invoke();
-            return true;
-        }
-        _current = _stack.Pop();
-        _current();
-        return true;
-    }
-
-    private void Navigate(Action render)
-    {
-        _generation++;
-        if (_current is not null)
-        {
-            _stack.Push(_current);
-        }
-        _current = render;
-        render();
-    }
-
-    private void Replace(Action render)
-    {
-        _current = render;
-        render();
-    }
+    /// <summary>Invalidates outstanding work when the host hides this view, so an
+    /// abandoned grid stops downloading and its decoded bitmaps are dropped instead of
+    /// landing on a detached <see cref="Image"/>.</summary>
+    public void Close() => _navigationGeneration++;
 
     private void RenderNoKey()
     {
@@ -168,7 +129,7 @@ public sealed class ArtworkView : UserControl
         stack.Children.Add(Caption($"Get one at {SteamGridDb.KeyPageUrl}"));
         stack.Children.Add(SectionLabel(""));
         stack.Children.Add(Row("Close", "Back to Tools", Icons.ExitFullscreen,
-            () => CloseRequested?.Invoke()));
+            RequestClose));
         SetContent(stack);
     }
 
@@ -184,10 +145,10 @@ public sealed class ArtworkView : UserControl
 
     private async Task RenderGameListAsync()
     {
-        var generation = _generation;
+        var generation = _navigationGeneration;
         RenderMessage("Change Artwork", "Loading your games…");
         var games = await SafeGamesAsync();
-        if (generation != _generation) { return; }
+        if (generation != _navigationGeneration) { return; }
         _games = games;
         RenderGamePage(0);
     }
@@ -261,11 +222,6 @@ public sealed class ArtworkView : UserControl
     private void RenderAssetTypes()
     {
         var stack = NewStack("Change Artwork");
-        if (_notice is not null)
-        {
-            stack.Children.Add(Caption(_notice));
-            _notice = null;
-        }
         stack.Children.Add(Caption(_sgdbGameId > 0
             ? $"Applying to: {_appName}  ·  art from your search"
             : IsShortcutApp(_appId)
@@ -287,7 +243,7 @@ public sealed class ArtworkView : UserControl
                 IsVisible = false,
             };
             stack.Children.Add(preview);
-            _ = LoadCurrentArtAsync(preview, _appId, a, _generation);
+            _ = LoadCurrentArtAsync(preview, _appId, a, _navigationGeneration);
         }
         stack.Children.Add(SectionLabel(""));
         stack.Children.Add(Row("Wrong game? Search by name", "For ROMs, shortcuts, or misdetections",
@@ -340,7 +296,7 @@ public sealed class ArtworkView : UserControl
         }
         Navigate(() => RenderMessage("Search SteamGridDB", $"Searching for \"{term}\"…"));
         // Navigate invalidates the previous level, so snapshot after it.
-        var generation = _generation;
+        var generation = _navigationGeneration;
         IReadOnlyList<SgdbGame> matches;
         string? failure = null;
         try
@@ -353,7 +309,7 @@ public sealed class ArtworkView : UserControl
             matches = Array.Empty<SgdbGame>();
             failure = ex.Message;
         }
-        if (generation != _generation) { return; }
+        if (generation != _navigationGeneration) { return; }
         Replace(() =>
         {
             var stack = NewStack("Pick a Match");
@@ -416,7 +372,7 @@ public sealed class ArtworkView : UserControl
         var targetAppId = _appId;
         Navigate(() => RenderMessage(AssetLabel(asset), "Loading artwork from SteamGridDB…"));
         // Navigate invalidates the previous level, so snapshot after it.
-        var generation = _generation;
+        var generation = _navigationGeneration;
         IReadOnlyList<SgdbAsset> assets;
         string? failure = null;
         try
@@ -431,7 +387,7 @@ public sealed class ArtworkView : UserControl
             assets = Array.Empty<SgdbAsset>();
             failure = ex.Message;
         }
-        if (generation != _generation || targetAppId != _appId || sourceGameId != _sgdbGameId)
+        if (generation != _navigationGeneration || targetAppId != _appId || sourceGameId != _sgdbGameId)
         {
             return;
         }
@@ -481,7 +437,7 @@ public sealed class ArtworkView : UserControl
             Margin = new Avalonia.Thickness(3),
         };
         button.Click += (_, _) => onClick();
-        _ = LoadThumbAsync(image, string.IsNullOrEmpty(art.Thumb) ? art.Url : art.Thumb, _generation);
+        _ = LoadThumbAsync(image, string.IsNullOrEmpty(art.Thumb) ? art.Url : art.Thumb, _navigationGeneration);
         return button;
     }
 
@@ -528,7 +484,7 @@ public sealed class ArtworkView : UserControl
             {
                 return;
             }
-            if (generation != _generation)
+            if (generation != _navigationGeneration)
             {
                 bitmap.Dispose();
                 return;
@@ -550,12 +506,12 @@ public sealed class ArtworkView : UserControl
         {
             // Checked before the download, not only after it: a queued thumbnail
             // whose screen the user already left is not worth fetching at all.
-            if (generation != _generation)
+            if (generation != _navigationGeneration)
             {
                 return;
             }
             var bytes = await SteamGridDb.DownloadImageAsync(url);
-            if (generation != _generation || bytes is null || bytes.Length == 0)
+            if (generation != _navigationGeneration || bytes is null || bytes.Length == 0)
             {
                 return;
             }
@@ -565,7 +521,7 @@ public sealed class ArtworkView : UserControl
                 {
                     using var stream = new MemoryStream(bytes);
                     var bitmap = Bitmap.DecodeToWidth(stream, 300);
-                    if (generation == _generation)
+                    if (generation == _navigationGeneration)
                     {
                         (image.Source as IDisposable)?.Dispose();
                         image.Source = bitmap;
@@ -601,7 +557,7 @@ public sealed class ArtworkView : UserControl
         Navigate(() => RenderMessage(AssetLabel(asset),
             art is null ? "Resetting to official art…" : "Applying artwork…"));
         // Navigate invalidates the previous level, so snapshot after it.
-        var generation = _generation;
+        var generation = _navigationGeneration;
 
         ArtworkResult result;
         try
@@ -629,7 +585,7 @@ public sealed class ArtworkView : UserControl
             result = new ArtworkResult(false, "Something went wrong — see the log.");
         }
 
-        if (generation != _generation || targetAppId != _appId)
+        if (generation != _navigationGeneration || targetAppId != _appId)
         {
             return;
         }
@@ -638,35 +594,6 @@ public sealed class ArtworkView : UserControl
         _notice = result.Detail;
         _stack.Clear();
         Replace(RenderAssetTypes);
-    }
-
-    // ---- Shared builders (mirrors LibraryTabsView) ----
-
-    private void PopIfAny()
-    {
-        if (_stack.Count > 0)
-        {
-            _stack.Pop();
-        }
-    }
-
-    private async Task<IReadOnlyList<SteamCollections.AppInfo>> SafeGamesAsync()
-    {
-        try
-        {
-            return await SteamCollections.GetGamesAsync();
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"Artwork: games list failed: {ex.Message}");
-            return Array.Empty<SteamCollections.AppInfo>();
-        }
-    }
-
-    private static async Task RunSafelyAsync(Task task, string operation)
-    {
-        try { await task; }
-        catch (Exception ex) { Log.Error($"Artwork {operation} failed.", ex); }
     }
 
     private string NameFor(long appId)
@@ -718,70 +645,15 @@ public sealed class ArtworkView : UserControl
         _ => (120, 180),
     };
 
-    private StackPanel NewStack(string heading)
-    {
-        var stack = new StackPanel { Spacing = 4 };
-        if (!string.IsNullOrEmpty(heading))
-        {
-            stack.Children.Add(new TextBlock
-            {
-                Text = heading,
-                FontSize = 15,
-                FontWeight = FontWeight.SemiBold,
-                Margin = new Avalonia.Thickness(0, 0, 0, 4),
-            });
-        }
-        return stack;
-    }
-
-    private void RenderMessage(string heading, string message)
-    {
-        var stack = NewStack(heading);
-        stack.Children.Add(Caption(message));
-        SetContent(stack);
-    }
-
-    private CardButton Row(string title, string desc, Geometry? icon, Action onClick)
-    {
-        var button = new CardButton { Title = title, Description = desc, IconGeometry = icon };
-        button.Click += (_, _) => onClick();
-        return button;
-    }
-
-    private CardButton PrimaryRow(string title, string desc, Geometry? icon, Action onClick)
-    {
-        var button = Row(title, desc, icon, onClick);
-        button.Classes.Add("primary");
-        return button;
-    }
-
-    private TextBlock Caption(string text) => new()
-    {
-        Text = text,
-        Classes = { "caption" },
-        TextWrapping = TextWrapping.Wrap,
-        Margin = new Avalonia.Thickness(2, 0, 2, 4),
-    };
-
-    private TextBlock SectionLabel(string text) => new()
-    {
-        Text = text,
-        Classes = { "eyebrow" },
-        Margin = new Avalonia.Thickness(2, 6, 2, 2),
-    };
-
-    // Content goes straight into the host (no inner ScrollViewer): the overlay's
-    // ContentScroller owns scrolling and its GotFocus→BringIntoView keeps the focused
-    // control — including on-screen-keyboard keys — on screen (Codex's fix). A nested
-    // scroller would swallow that scroll-into-view.
-    private void SetContent(StackPanel stack)
+    // Replacing a level drops its decoded bitmaps immediately rather than waiting for a
+    // collection: an artwork grid holds full-size thumbnails, and the overlay is resident.
+    private protected override void SetContent(StackPanel stack)
     {
         if (Content is Control previous)
         {
             DisposeImages(previous);
         }
-        Content = stack;
-        FocusFirst(stack);
+        base.SetContent(stack);
     }
 
     private static void DisposeImages(Control root)
@@ -804,26 +676,4 @@ public sealed class ArtworkView : UserControl
         }
     }
 
-    private void FocusFirst(StackPanel stack) => Dispatcher.UIThread.Post(() =>
-    {
-        foreach (var child in stack.Children)
-        {
-            if (child is Button { IsEffectivelyEnabled: true } b)
-            {
-                b.Focus(NavigationMethod.Directional);
-                return;
-            }
-            if (child is WrapPanel wrap)
-            {
-                foreach (var wc in wrap.Children)
-                {
-                    if (wc is Button wb)
-                    {
-                        wb.Focus(NavigationMethod.Directional);
-                        return;
-                    }
-                }
-            }
-        }
-    });
 }

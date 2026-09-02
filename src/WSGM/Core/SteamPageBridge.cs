@@ -27,22 +27,10 @@ public static class SteamPageBridge
 {
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(8);
 
-    // Current-game detection, two signals in priority order, both live-verified:
-    //
-    // 1) The FOCUSED element's React fiber. Big Picture's gamepad UI keeps DOM focus
-    //    on the selected control (the "focus outline"), and walking the fiber's
-    //    parents finds the props of the component that owns it — a carousel cover or
-    //    a game page carries its app there (props.appid or props.app.appid).
-    //    Live-verified with an imageless custom shortcut focused on a theme home
-    //    screen: returned its generated appid at 10 hops while the page had zero
-    //    library-asset images. Image-independent, so it also CLEARS correctly when
-    //    a non-game element is focused (its ancestors carry no appid).
-    //
-    // 2) Fallback: the LARGEST WIDE library-asset image (assets/<appid>/…) that
-    //    straddles the horizontal viewport center and is effectively visible
-    //    (checkVisibility, feature-detected — a stale faded-out hero must not win;
-    //    live-verified rejecting an opacity-0 leftover). Covers mouse/touch use
-    //    where DOM focus may sit on the body.
+    // Current-game detection, two signals in priority order — the focused element's React fiber,
+    // then the largest wide visible library-asset image. Both live-verified; the rules and their
+    // evidence are in docs\steam-cef.md §10. ONE source string shared with the resident badge
+    // below, so the center/visibility rules cannot drift between the two consumers.
     private const string CurrentAppIdJs =
         "(()=>{try{" +
         "try{const el=document.activeElement;" +
@@ -85,7 +73,7 @@ public static class SteamPageBridge
     public static async Task<long> GetCurrentAppIdAsync(CancellationToken cancellationToken = default)
     {
         var expression = "JSON.stringify(Object.assign({ok:true}," + CurrentAppIdJs + "))";
-        var result = await SteamCef.EvaluateOnVisibleWindowAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateOnVisibleWindowAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         var fromPage = ParseAppId(result);
         if (fromPage > 0)
@@ -93,7 +81,7 @@ public static class SteamPageBridge
             Log.Info($"Steam current app {fromPage} ({ParseSignal(result)}).");
             return fromPage;
         }
-        var routeResult = await SteamCef.EvaluateAsync(
+        var routeResult = await SteamUiTransportSession.EvaluateAsync(
             "JSON.stringify({ok:true,id:" + RouteAppIdJs + "})", Budget, cancellationToken)
             .ConfigureAwait(false);
         var fromRoute = ParseAppId(routeResult);
@@ -153,8 +141,9 @@ public static class SteamPageBridge
 
     /// <summary>Disconnects the resident badge observer and removes its node from the
     /// visible Steam page. Best-effort shutdown for desktop mode and process exit.</summary>
-    public static Task<CefEvalResult> DisableBadgeAsync(CancellationToken cancellationToken = default)
-        => SteamCef.EvaluateOnVisibleWindowAsync(
+    internal static Task<CefEvalResult> DisableBadgeAsync(
+        CancellationToken cancellationToken = default)
+        => SteamUiTransportSession.EvaluateOnVisibleWindowAsync(
             "(()=>{try{window.__wsgm&&window.__wsgm.disableBadge&&window.__wsgm.disableBadge();return JSON.stringify({ok:true});}catch(e){return JSON.stringify({ok:false,err:String(e)});}})()",
             Budget, cancellationToken);
 
@@ -179,7 +168,7 @@ public static class SteamPageBridge
 
         // The badge lives in the VISIBLE library window (the DOM the user sees), not the
         // headless SharedJSContext where the stores are.
-        var result = await SteamCef.EvaluateOnVisibleWindowAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateOnVisibleWindowAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable)
         {

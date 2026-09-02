@@ -14,11 +14,25 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # See ci.yml: the release publish ships the gate and FFI DLLs built from
+          # native/SteamInput and links external/windows-device-control, both submodules.
+          submodules: recursive
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Add Rust clippy component
+        shell: pwsh
+        run: rustup component add clippy
 
       # Derive the version once (v1.2.3 -> 1.2.3). The tag name goes through env,
       # never spliced into script source (script-injection hardening).
@@ -52,9 +66,15 @@ jobs:
           $mver = $parts -join '.'
           (Get-Content src/WSGM/app.manifest) -replace 'assemblyIdentity version="[^"]*"', "assemblyIdentity version=`"$mver`"" | Set-Content src/WSGM/app.manifest
 
-      # windows-latest ships VS Build Tools (NativeAOT linker) and Inno Setup 6 —
+      # A tag is not allowed to bypass the same source, generated-asset, Rust clippy, build, and
+      # test gate used for ordinary pushes. build.ps1 repeats its release-specific staging checks.
+      - name: Verify release source (including Rust clippy)
+        shell: pwsh
+        run: ./eng/verify.ps1
+
+      # windows-latest ships the .NET SDK, native build tools, and Inno Setup 6 —
       # exactly what build.ps1 expects locally.
-      - name: Build (NativeAOT publish + installer)
+      - name: Build (self-contained publish + installer)
         shell: pwsh
         run: .\build.ps1
 

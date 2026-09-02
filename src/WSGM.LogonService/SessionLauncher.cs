@@ -25,6 +25,7 @@ internal static class SessionLauncher
     private const uint WaitObject0 = 0;
 
     private static readonly TimeSpan LaunchRetryDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan AnchorRecoveryGrace = TimeSpan.FromSeconds(5);
 
     private sealed class SessionState
     {
@@ -219,6 +220,33 @@ internal static class SessionLauncher
                             $"session active={sessionActive}, explorer running={explorerRunning}.");
             if (sessionActive && dirtyExit && !explorerRunning)
             {
+                // A normal shell session owns a medium/jobless anchor that observes the same WSGM
+                // process handle and restores Explorer after owner loss. Give that narrow path one
+                // bounded window to publish its shell before the SYSTEM watchdog uses its robust
+                // token fallback; otherwise both creators race and the fallback can win with the
+                // job-bound process semantics the anchor exists to avoid.
+                var recoveryDeadline = DateTime.UtcNow + AnchorRecoveryGrace;
+                while (DateTime.UtcNow < recoveryDeadline
+                    && IsSessionActive(sessionId)
+                    && !IsExplorerInSession(sessionId))
+                {
+                    Thread.Sleep(250);
+                }
+                sessionActive = IsSessionActive(sessionId);
+                explorerRunning = IsExplorerInSession(sessionId);
+                if (!sessionActive)
+                {
+                    ServiceLog.Info(
+                        $"Session {sessionId}: explorer fallback skipped because the session ended during anchor grace.");
+                }
+                else if (explorerRunning)
+                {
+                    ServiceLog.Info(
+                        $"Session {sessionId}: explorer appeared during anchor grace; SYSTEM fallback skipped.");
+                }
+            }
+            if (sessionActive && dirtyExit && !explorerRunning)
+            {
                 // One explorer fallback per logon, always with the UNLINKED user
                 // token — explorer must run unelevated (elevated explorer breaks
                 // UWP / the touch keyboard). WSGM itself is never relaunched here;
@@ -340,8 +368,11 @@ internal static class SessionLauncher
 
         if (!NativeMethods.CreateEnvironmentBlock(out var environment, token, false))
         {
-            // Launch with the service's environment rather than not at all.
-            environment = 0;
+            error = Marshal.GetLastWin32Error();
+            ServiceLog.Warn(
+                $"CreateEnvironmentBlock failed (error {error}); refusing to launch an "
+                    + "interactive process with the SYSTEM service environment.");
+            return false;
         }
         var desktop = Marshal.StringToHGlobalUni(@"winsta0\default");
         try
@@ -376,14 +407,32 @@ internal static class SessionLauncher
 
     private static string? GetUserProfileDirectory(nint token)
     {
-        var size = 512u;
-        var buffer = new char[size];
-        if (!NativeMethods.GetUserProfileDirectoryW(token, buffer, ref size))
+        uint size = 0;
+        _ = NativeMethods.GetUserProfileDirectoryW(token, null, ref size);
+        if (size == 0)
         {
             return null;
         }
-        var terminator = Array.IndexOf(buffer, '\0');
-        return new string(buffer, 0, terminator < 0 ? buffer.Length : terminator);
+
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            var buffer = new char[size];
+            uint available = size;
+            if (NativeMethods.GetUserProfileDirectoryW(token, buffer, ref available))
+            {
+                int terminator = Array.IndexOf(buffer, '\0');
+                return new string(buffer, 0, terminator < 0 ? buffer.Length : terminator);
+            }
+
+            if (available <= size)
+            {
+                return null;
+            }
+
+            size = available;
+        }
+
+        return null;
     }
 
     private static TimeSpan? GetLogonAge(uint sessionId)

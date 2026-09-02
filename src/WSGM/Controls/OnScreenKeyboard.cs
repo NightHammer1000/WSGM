@@ -148,13 +148,13 @@ public sealed class OnScreenKeyboard : Decorator
         }
     });
 
-    private Button KeyButton(string label, Action action, double width = 38)
+    private Button KeyButton(string label, Action action, double width = 44)
     {
         var button = new Button
         {
             Content = label,
             Width = width,
-            Height = 40,
+            Height = 44,
             HorizontalContentAlignment = HorizontalAlignment.Center,
             VerticalContentAlignment = VerticalAlignment.Center,
             // Constant border, no adorner: the repo's focus discipline, so a
@@ -200,13 +200,23 @@ public sealed class OnScreenKeyboard : Decorator
         target.SelectionEnd = target.CaretIndex;
     }
 
-    private void Backspace()
+    internal void Backspace()
     {
         if (Target is not { } target)
         {
             return;
         }
         var current = target.Text ?? "";
+        var start = Math.Clamp(Math.Min(target.SelectionStart, target.SelectionEnd), 0, current.Length);
+        var end = Math.Clamp(Math.Max(target.SelectionStart, target.SelectionEnd), start, current.Length);
+        if (end > start)
+        {
+            target.Text = current[..start] + current[end..];
+            target.CaretIndex = start;
+            target.SelectionStart = start;
+            target.SelectionEnd = start;
+            return;
+        }
         var caret = Math.Clamp(target.CaretIndex, 0, current.Length);
         if (caret == 0 || current.Length == 0)
         {
@@ -214,6 +224,8 @@ public sealed class OnScreenKeyboard : Decorator
         }
         target.Text = current[..(caret - 1)] + current[caret..];
         target.CaretIndex = caret - 1;
+        target.SelectionStart = target.CaretIndex;
+        target.SelectionEnd = target.CaretIndex;
     }
 
     /// <summary>Resets to the lower-case letter layer.</summary>

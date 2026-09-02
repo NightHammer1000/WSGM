@@ -3,8 +3,8 @@ using System.Runtime.InteropServices;
 namespace WSGM.LogonService.Interop;
 
 /// <summary>Flat Win32 surface for the logon service: SCM plumbing, WTS session
-/// queries, token handling, and CreateProcessAsUser. LibraryImport + blittable
-/// only (NativeAOT, no COM).</summary>
+/// queries, token handling, and CreateProcessAsUser. The service keeps this boundary
+/// source-generated and free of process-wide COM state.</summary>
 internal static partial class NativeMethods
 {
     // ---- Service control manager: hosting ----
@@ -26,6 +26,7 @@ internal static partial class NativeMethods
     internal const int ErrorCallNotImplemented = 120;
     internal const int ErrorFailedServiceControllerConnect = 1063;
     internal const int ErrorServiceAlreadyRunning = 1056;
+    internal const int ErrorServiceNotActive = 1062;
     internal const uint WtsSessionLogon = 5;
     internal const uint WtsSessionLogoff = 6;
 
@@ -297,7 +298,7 @@ internal static partial class NativeMethods
 
     [LibraryImport("userenv.dll", EntryPoint = "GetUserProfileDirectoryW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool GetUserProfileDirectoryW(nint hToken, [Out] char[] lpProfileDir, ref uint lpcchSize);
+    internal static partial bool GetUserProfileDirectoryW(nint hToken, [Out] char[]? lpProfileDir, ref uint lpcchSize);
 
     // ---- Handles / waits ----
     internal const uint Infinite = 0xFFFFFFFF;

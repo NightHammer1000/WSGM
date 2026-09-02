@@ -67,7 +67,7 @@ public enum GamepadButtons : uint
 
 /// <summary>Polls all connected controllers through SDL3 on the UI thread while
 /// enabled. Emits edge-triggered button events with D-pad/stick auto-repeat.</summary>
-public sealed class GamepadService : IDisposable
+public sealed class GamepadService : IUiButtonSource, IDisposable
 {
     // Monotonic (Environment.TickCount64) rather than wall-clock deadlines: a
     // backward system-clock adjustment — w32time resyncing shortly after logon,
@@ -126,10 +126,6 @@ public sealed class GamepadService : IDisposable
 
     /// <summary>Stops polling without shutting down SDL's process-wide state.</summary>
     public void Stop() => _timer.Stop();
-
-    /// <summary>True when a controller with back paddles (a real or emulated Steam
-    /// Deck class pad) is connected, so paddles/Steam/QAM are bindable.</summary>
-    public bool HasDeckButtons => SdlGamepads.HasDeckButtons;
 
     private void Poll()
     {

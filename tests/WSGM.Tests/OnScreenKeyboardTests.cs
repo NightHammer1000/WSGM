@@ -42,6 +42,45 @@ public class OnScreenKeyboardTests
     }
 
     [Fact]
+    public void Backspace_RemovesTheSelectionBeforeTouchingThePreviousCharacter()
+    {
+        var box = new Avalonia.Controls.TextBox
+        {
+            Text = "keep REMOVE keep",
+            SelectionStart = 5,
+            SelectionEnd = 11,
+        };
+        var keyboard = new OnScreenKeyboard { Target = box };
+
+        keyboard.Backspace();
+
+        Assert.Equal("keep  keep", box.Text);
+        Assert.Equal(5, box.CaretIndex);
+        Assert.Equal(5, box.SelectionStart);
+        Assert.Equal(5, box.SelectionEnd);
+    }
+
+    [Fact]
+    public void Backspace_DeletesOneCharacterAndCollapsesTheCaret()
+    {
+        var box = new Avalonia.Controls.TextBox
+        {
+            Text = "abcd",
+            SelectionStart = 3,
+            SelectionEnd = 3,
+            CaretIndex = 3,
+        };
+        var keyboard = new OnScreenKeyboard { Target = box };
+
+        keyboard.Backspace();
+
+        Assert.Equal("abd", box.Text);
+        Assert.Equal(2, box.CaretIndex);
+        Assert.Equal(2, box.SelectionStart);
+        Assert.Equal(2, box.SelectionEnd);
+    }
+
+    [Fact]
     public void EveryCharacterAWpaPassphraseMayContainIsReachable()
     {
         // This keyboard is the only text entry in game mode: Windows' own touch

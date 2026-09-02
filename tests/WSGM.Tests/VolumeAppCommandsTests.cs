@@ -1,3 +1,4 @@
+using WindowsDeviceControl;
 using WSGM.Shell;
 
 namespace WSGM.Tests;
@@ -5,12 +6,12 @@ namespace WSGM.Tests;
 public sealed class VolumeAppCommandsTests
 {
     [Theory]
-    [InlineData(8)]
-    [InlineData(9)]
-    [InlineData(10)]
-    public void FromShellHookLParam_DecodesPackedVolumeCommand(int command)
+    [InlineData(CoreAudio.VolumeCommand.ToggleMute)]
+    [InlineData(CoreAudio.VolumeCommand.StepDown)]
+    [InlineData(CoreAudio.VolumeCommand.StepUp)]
+    public void FromShellHookLParam_DecodesPackedVolumeCommand(CoreAudio.VolumeCommand command)
     {
-        var packed = (nint)(command << 16);
+        var packed = (nint)((int)command << 16);
 
         Assert.Equal(command, VolumeAppCommands.FromShellHookLParam(packed));
     }
@@ -18,12 +19,14 @@ public sealed class VolumeAppCommandsTests
     [Fact]
     public void FromShellHookLParam_AcceptsOemAlreadyExtractedCommand()
     {
-        Assert.Equal(VolumeAppCommands.Up, VolumeAppCommands.FromShellHookLParam(VolumeAppCommands.Up));
+        Assert.Equal(
+            CoreAudio.VolumeCommand.StepUp,
+            VolumeAppCommands.FromShellHookLParam((nint)CoreAudio.VolumeCommand.StepUp));
     }
 
     [Fact]
     public void FromShellHookLParam_IgnoresNonVolumeCommand()
     {
-        Assert.Equal(0, VolumeAppCommands.FromShellHookLParam((nint)(14 << 16)));
+        Assert.Null(VolumeAppCommands.FromShellHookLParam((nint)(14 << 16)));
     }
 }

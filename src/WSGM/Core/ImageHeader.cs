@@ -22,7 +22,7 @@ namespace WSGM.Core;
 /// avoid committing an unbounded allocation on a file's say-so. Nothing is
 /// validated beyond plausibility (positive, in range).
 ///
-/// Pure, AOT-safe, dependency-free: plain <see cref="FileStream"/> byte reads,
+/// Small and dependency-free: plain <see cref="FileStream"/> byte reads,
 /// no reflection, no imaging stack, and it never throws (any I/O or format
 /// surprise reports "unknown").</summary>
 public static class ImageHeader

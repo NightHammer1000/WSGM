@@ -32,8 +32,7 @@ public sealed class BootManifest
     public string ExePath { get; set; } = "";
 }
 
-/// <summary>Source-generated JSON metadata for the boot manifest (AOT-safe in both
-/// the app and the service).</summary>
+/// <summary>Shared source-generated JSON metadata that keeps the app and service on one boot-manifest contract.</summary>
 [JsonSerializable(typeof(BootManifest))]
 [JsonSourceGenerationOptions(WriteIndented = true)]
 public partial class BootManifestJsonContext : JsonSerializerContext

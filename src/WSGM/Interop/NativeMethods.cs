@@ -5,6 +5,12 @@ namespace WSGM.Interop;
 
 internal static partial class NativeMethods
 {
+    internal const uint MbOk = 0x00000000;
+    internal const uint MbIconError = 0x00000010;
+
+    [LibraryImport("user32.dll", EntryPoint = "MessageBoxW", StringMarshalling = StringMarshalling.Utf16)]
+    internal static partial int MessageBoxW(nint hWnd, string text, string caption, uint type);
+
     // ---- Shell / desktop detection ----
     [LibraryImport("user32.dll")]
     internal static partial nint GetShellWindow();
@@ -15,6 +21,12 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool PostMessageW(nint hWnd, uint msg, nint wParam, nint lParam);
+
+    /// <summary>Returns the effective DPI for the monitor currently containing
+    /// <paramref name="hWnd"/>. Unlike a cached screen descriptor, this reflects
+    /// a window that has just crossed onto another monitor.</summary>
+    [LibraryImport("user32.dll")]
+    internal static partial uint GetDpiForWindow(nint hWnd);
 
     // ---- Input-desktop readiness (Core\InputDesktop) ----
     [LibraryImport("user32.dll", SetLastError = true)]
@@ -309,6 +321,19 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll")]
     internal static partial nint GetForegroundWindow();
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeRect
+    {
+        internal int Left;
+        internal int Top;
+        internal int Right;
+        internal int Bottom;
+    }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetWindowRect(nint hWnd, out NativeRect rect);
+
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool ShowWindow(nint hWnd, int nCmdShow);
@@ -318,18 +343,48 @@ internal static partial class NativeMethods
     internal static partial bool IsIconic(nint hWnd);
 
     internal const int SwRestore = 9;
-    internal const int SwShowMaximized = 3;
 
     // ---- Touch-synthesized mouse message detection (overlay ghost-click eater) ----
     internal const uint WmMouseMove = 0x0200;
     internal const uint WmLButtonDown = 0x0201;
     internal const uint WmLButtonUp = 0x0202;
+    /// <summary>Sent to an inactive window before a mouse button-down; the reply decides whether
+    /// the click activates it. Touch activation uses WM_POINTERACTIVATE instead, so a reply here
+    /// affects only mouse clicks — real ones and the ones Windows synthesizes from a tap.</summary>
+    internal const uint WmMouseActivate = 0x0021;
+    /// <summary>WM_MOUSEACTIVATE reply: deliver the click, do not activate.</summary>
+    internal const nint MaNoActivate = 3;
     /// <summary>GetMessageExtraInfo() upper bits marking touch/pen-synthesized mouse messages.</summary>
     internal const uint MiWpSignatureMask = 0xFFFFFF00;
     internal const uint MiWpSignature = 0xFF515700;
 
     [LibraryImport("user32.dll")]
     internal static partial nint GetMessageExtraInfo();
+
+    /// <summary>Swallows the mouse messages Windows synthesizes behind a touch, for a window that
+    /// already handled the touch itself.</summary>
+    /// <remarks>
+    /// Every focus-taking WSGM window installs this. Without it a tap lands twice — once as touch
+    /// on the surface the user aimed at, and again as a synthesized click on whatever moved into
+    /// that position afterwards, which is the ghost-click the overlay's deferred close exists
+    /// alongside. Written as a hook callback so <c>Win32Properties.AddWndProcHookCallback</c> can
+    /// take it directly.
+    /// </remarks>
+    internal static nint SwallowTouchSynthesizedMouse(
+        nint hWnd,
+        uint msg,
+        nint wParam,
+        nint lParam,
+        ref bool handled)
+    {
+        if (msg is WmMouseMove or WmLButtonDown or WmLButtonUp
+            && ((uint)GetMessageExtraInfo() & MiWpSignatureMask) == MiWpSignature)
+        {
+            handled = true;
+        }
+
+        return nint.Zero;
+    }
 
     // ---- Idle memory trim (Core\MemoryTrim) ----
     [LibraryImport("kernel32.dll")]
@@ -359,7 +414,6 @@ internal static partial class NativeMethods
     // ---- Notification suitability (volume OSD) ----
     internal const int QunsNotPresent = 1;
     internal const int QunsRunningD3dFullScreen = 3;
-    internal const int QunsAcceptsNotifications = 5;
 
     [LibraryImport("shell32.dll")]
     internal static partial int SHQueryUserNotificationState(out int state);
@@ -405,6 +459,10 @@ internal static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool ResetEvent(nint eventHandle);
 
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetEvent(nint eventHandle);
+
     [LibraryImport("kernel32.dll")]
     internal static partial nint LocalFree(nint mem);
 
@@ -426,6 +484,11 @@ internal static partial class NativeMethods
     [LibraryImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool GetTokenInformation(nint tokenHandle, int tokenInformationClass, out uint tokenInformation, uint tokenInformationLength, out uint returnLength);
+
+    /// <summary>Buffer-based overload for variable-length token classes (integrity SID).</summary>
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetTokenInformation(nint tokenHandle, int tokenInformationClass, nint tokenInformation, uint tokenInformationLength, out uint returnLength);
 
     [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -517,7 +580,7 @@ internal static partial class NativeMethods
     [LibraryImport("ntdll.dll")]
     internal static partial void RtlGetNtVersionNumbers(out uint major, out uint minor, out uint build);
 
-    // ---- System status (taskbar clock/battery cluster; Wi-Fi comes from NativeRadio) ----
+    // ---- System status (taskbar clock/battery cluster; Wi-Fi lives in WindowsRadio) ----
     /// <summary>SYSTEM_POWER_STATUS: BatteryFlag 128 = no system battery, 255 = unknown;
     /// BatteryLifePercent 255 = unknown.</summary>
     [StructLayout(LayoutKind.Sequential)]
@@ -534,6 +597,32 @@ internal static partial class NativeMethods
     [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool GetSystemPowerStatus(out SystemPowerStatus status);
+
+    // ---- RTSS OSD metrics (Core\RtssOsd) ----
+    // FILETIME pairs as raw 64-bit ticks; kernel time includes idle.
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetSystemTimes(
+        out long idleTime, out long kernelTime, out long userTime);
+
+    /// <summary>MEMORYSTATUSEX; <see cref="Length"/> must be set before the call.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MemoryStatusEx
+    {
+        public uint Length;
+        public uint MemoryLoad;
+        public ulong TotalPhys;
+        public ulong AvailPhys;
+        public ulong TotalPageFile;
+        public ulong AvailPageFile;
+        public ulong TotalVirtual;
+        public ulong AvailVirtual;
+        public ulong AvailExtendedVirtual;
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GlobalMemoryStatusEx(ref MemoryStatusEx status);
 
     // ---- Window icons (taskbar) ----
     internal const uint WmGetIcon = 0x007F;
@@ -661,6 +750,17 @@ internal static partial class NativeMethods
 
     /// <summary>PBT_POWERSETTINGCHANGE — wParam of a power-setting notification.</summary>
     internal const nint PbtPowerSettingChange = 0x8013;
+
+    /// <summary>PBT_APMSUSPEND — the system is about to enter a suspended state.</summary>
+    internal const nint PbtApmSuspend = 0x4;
+
+    /// <summary>PBT_APMRESUMESUSPEND — the system resumed from a normal suspend.</summary>
+    internal const nint PbtApmResumeSuspend = 0x7;
+
+    /// <summary>PBT_APMRESUMEAUTOMATIC — the system resumed, possibly with no user present.
+    /// Windows always sends this one on resume and adds PBT_APMRESUMESUSPEND when the user
+    /// caused it, so both must be treated as the same "hardware is back" signal.</summary>
+    internal const nint PbtApmResumeAutomatic = 0x12;
 
     /// <summary>GUID_SESSION_DISPLAY_STATUS {2B84C20E-AD23-4DDF-93DB-05FFBD7EFCA5}: the
     /// display of the CALLING SESSION turned on or off. Microsoft documents this as the
@@ -797,8 +897,14 @@ internal static partial class NativeMethods
     /// <summary>WM_WTSSESSION_CHANGE.</summary>
     internal const uint WmWtsSessionChange = 0x02B1;
 
+    /// <summary>WTS_SESSION_LOCK — the session's desktop was locked.</summary>
+    internal const nint WtsSessionLock = 0x7;
+
     /// <summary>WTS_SESSION_UNLOCK — the session's desktop was unlocked.</summary>
     internal const nint WtsSessionUnlock = 0x8;
+
+    /// <summary>WTS_SESSION_LOGOFF — this interactive session is ending.</summary>
+    internal const nint WtsSessionLogoff = 0x6;
 
     /// <summary>NOTIFY_FOR_THIS_SESSION.</summary>
     internal const uint NotifyForThisSession = 0;

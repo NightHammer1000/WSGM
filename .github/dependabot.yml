@@ -24,14 +24,6 @@ updates:
       cargo-minor-patch:
         update-types: ["minor", "patch"]
 
-  - package-ecosystem: "cargo"
-    directory: "/native/Radio"
-    schedule:
-      interval: "weekly"
-    groups:
-      cargo-minor-patch:
-        update-types: ["minor", "patch"]
-
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

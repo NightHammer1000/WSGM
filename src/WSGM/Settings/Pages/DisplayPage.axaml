@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:s="using:WSGM.Settings"
+             xmlns:core="using:WSGM.Core"
              x:Class="WSGM.Settings.Pages.DisplayPage"
              x:DataType="s:SettingsViewModel">
     <Border Padding="16,10">
@@ -25,7 +26,7 @@
             <ScrollViewer Grid.Row="1" IsVisible="{Binding ShowFixedDisplayProfiles}">
                 <ItemsControl ItemsSource="{Binding DisplayProfiles}">
                     <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="s:DisplayProfileRow">
+                        <DataTemplate x:DataType="core:MonitorDisplayProfile">
                             <Border Classes="setting-row">
                                 <StackPanel Spacing="6">
                                     <TextBlock Text="{Binding DisplayName}" Classes="setting-title" />

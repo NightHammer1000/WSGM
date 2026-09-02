@@ -20,6 +20,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Every first-party library, SDK, tool, and device package is commit-pinned as a
+          # submodule. Recursive checkout also resolves the SDK pins inside Device Lab and the
+          # built-in package.
+          submodules: recursive
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -39,8 +44,19 @@ jobs:
         shell: pwsh
         run: rustup component add clippy
 
-      # Both Rust workspaces are built by verify.ps1, so both target directories
-      # are cached and both lockfiles are part of the key.
+      # The device platform adds isolated runtime, tooling, plugin, and test projects, so a cold
+      # NuGet restore is a meaningful part of the run. Keyed on the project
+      # files because this repository pins versions in the csproj rather than in a
+      # packages.lock.json, which is what setup-dotnet's own caching would need.
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', 'Directory.Build.props') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      # The Steam Input workspace is built by verify.ps1, so its registry,
+      # checkout, target directory, and lockfile participate in the cache.
       - name: Cache Rust build output
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -48,8 +64,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/SteamInput/target
-            native/Radio/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('native/**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('native/SteamInput/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Lint, format, build, test, and collect coverage

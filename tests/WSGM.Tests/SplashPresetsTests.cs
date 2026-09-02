@@ -1,6 +1,5 @@
 using System.Text.Json;
 using WSGM.Core;
-using WSGM.Shell;
 
 namespace WSGM.Tests;
 

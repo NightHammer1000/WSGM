@@ -1,3 +1,5 @@
+using System;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
@@ -13,6 +15,9 @@ public class App : Application
     // Deliberate root for the headless shell session — without it the session
     // (and its config watcher) would survive only via incidental GC reachability.
     private ShellSession? _session;
+    private bool _shutdownInProgress;
+    private bool _sessionStopped;
+    private ApplicationShutdownOutcome? _shutdownOutcome;
 
     /// <inheritdoc />
     public override void Initialize()
@@ -30,6 +35,7 @@ public class App : Application
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            desktop.ShutdownRequested += OnShutdownRequested;
             switch (Program.Mode)
             {
                 case RunMode.Shell:
@@ -37,13 +43,13 @@ public class App : Application
                     // overlay is summoned. Keep the app alive explicitly.
                     desktop.ShutdownMode = Avalonia.Controls.ShutdownMode.OnExplicitShutdown;
                     _session = new ShellSession(config, serviceBoot: Program.ServiceBoot);
-                    _session.Start();
+                    _ = ObserveSessionStartupAsync(_session.StartAsync(), desktop);
                     break;
 
                 case RunMode.OverlayTest:
                     desktop.ShutdownMode = Avalonia.Controls.ShutdownMode.OnExplicitShutdown;
                     _session = new ShellSession(config, overlayTestOnly: true);
-                    _session.Start();
+                    _ = ObserveSessionStartupAsync(_session.StartAsync(), desktop);
                     break;
 
                 case RunMode.Settings:
@@ -56,5 +62,72 @@ public class App : Application
             }
         }
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private async Task ObserveSessionStartupAsync(
+        Task startup,
+        IClassicDesktopStyleApplicationLifetime desktop)
+    {
+        try
+        {
+            await startup;
+        }
+        catch (OperationCanceledException) when (_shutdownInProgress || _sessionStopped)
+        {
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Log.Error("Shell session startup failed", ex);
+            await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() => desktop.Shutdown(1));
+        }
+    }
+
+    private async void OnShutdownRequested(
+        object? sender,
+        ShutdownRequestedEventArgs eventArgs)
+    {
+        if (_shutdownInProgress)
+        {
+            eventArgs.Cancel = true;
+            return;
+        }
+
+        ApplicationShutdownReason reason = ApplicationShutdownRequest.Consume();
+        if (_session is null || _sessionStopped)
+        {
+            UpdateExitWatcher.ReportHandoff(
+                reason,
+                _shutdownOutcome ?? ApplicationShutdownOutcome.Clean);
+            return;
+        }
+
+        eventArgs.Cancel = true;
+        _shutdownInProgress = true;
+        ApplicationShutdownOutcome outcome = ApplicationShutdownOutcome.Failed;
+        try
+        {
+            outcome = await ApplicationShutdownCoordinator.ShutdownAsync(
+                deadline => _session.ShutdownAsync(reason, deadline),
+                reason);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // ShutdownRequested is necessarily an async-void framework boundary.
+            // Nothing may escape it: an unexpected cleanup fault must still report
+            // a failed handoff and terminate with the failure exit code.
+            Log.Error("Application shutdown failed", ex);
+            outcome = ApplicationShutdownOutcome.Failed;
+        }
+        finally
+        {
+            _shutdownOutcome = outcome;
+            UpdateExitWatcher.ReportHandoff(reason, outcome);
+            _sessionStopped = true;
+            _shutdownInProgress = false;
+            if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            {
+                desktop.Shutdown(ApplicationShutdownCoordinator.ExitCodeFor(outcome));
+            }
+        }
     }
 }

@@ -1,13 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
+using WindowsDeviceControl;
 using WSGM.Controls;
 using WSGM.Core;
 using WSGM.Shell;
+using RadioPower = WindowsDeviceControl.WindowsRadio.Power;
+using WifiSecurity = WindowsDeviceControl.WindowsRadio.WifiSecurity;
 
 namespace WSGM.Overlay;
 
@@ -36,12 +38,6 @@ public partial class RadioWindow : Window
     private string _promptSsid = "";
     private uint _promptToken;
 
-    /// <summary>Design-time constructor. Avalonia's XAML loader needs it.</summary>
-    public RadioWindow()
-        : this(new RadioManager(), bluetooth: false)
-    {
-    }
-
     /// <summary>The window's design size in DIPs, before the touch scale.</summary>
     private const double BaseWidth = 500;
     private const double BaseHeight = 600;
@@ -49,7 +45,7 @@ public partial class RadioWindow : Window
     private readonly double _uiScale;
 
     /// <summary>Creates the panel.</summary>
-    /// <param name="radios">The manager backing both tabs. Not owned: the taskbar's
+    /// <param name="radios">The manager backing both tabs. Not owned: the sheet's
     /// status object outlives this window.</param>
     /// <param name="bluetooth">True to open on the Bluetooth tab.</param>
     /// <param name="uiScale">The desktop-DPI scale factor for WSGM UI (e.g. 1.5
@@ -107,134 +103,24 @@ public partial class RadioWindow : Window
             _radios.PairingRequested -= OnPairingRequested;
             _radios.PropertyChanged -= OnRadiosPropertyChanged;
         };
-        // Controller navigation moves focus with Focus(Directional), which does
-        // NOT raise RequestBringIntoView — a network or device row below the
-        // fold would take focus while staying offscreen. Ask for it explicitly,
-        // exactly as the taskbar's scrolling strips do.
-        ListScroller.AddHandler(GotFocusEvent, OnRowGotFocus, RoutingStrategies.Bubble);
-        // Same touch-promotion defense as the overlay and taskbar (invariant 3):
-        // Avalonia never marks touch handled, so DefWindowProc synthesizes a
-        // late mouse click that would press whatever sits under the panel.
-        Win32Properties.AddWndProcHookCallback(this, WndProcHook);
-        KeyDown += (_, e) =>
-        {
-            if (e.Key == Avalonia.Input.Key.Escape)
-            {
-                Close();
-            }
-        };
+        StatusPanel.WirePanelBehaviour(this, ListScroller);
     }
 
-    /// <summary>Renders the panel at the user's desktop DPI. Game mode forces
-    /// every display to 100% scaling, which shrinks a DIP-sized panel — and the
-    /// on-screen keyboard inside it — to millimeters on dense handheld panels.
-    /// Same mechanism as the taskbar: a layout transform by the desktop factor,
-    /// with the window itself grown to hold the scaled content and clamped to
-    /// the display so it can never outgrow a short screen (the list scrolls).</summary>
-    /// <param name="taskbarTop">The bar's top edge in physical screen pixels, or
-    /// 0 when it is not on screen.</param>
-    private void ApplyTouchScale(int taskbarTop)
-    {
-        // Window scaling, not screen.Scaling — the screens cache is stale after
-        // a runtime display-scale flip (see OverlayWindow.DockToRightEdge).
-        var factor = Math.Clamp(_uiScale / DesktopScaling, 1.0, 3.0);
-        if (Math.Abs(factor - 1.0) >= 0.01)
-        {
-            Log.Info($"Radio panel UI scale {factor:0.##}x (desktop DPI over current {DesktopScaling:0.##}).");
-            RootScale.LayoutTransform = new Avalonia.Media.ScaleTransform(factor, factor);
-        }
-
-        var screen = Screens.Primary ?? (Screens.ScreenCount > 0 ? Screens.All[0] : null);
-        if (screen is not null)
-        {
-            // Clamp against the space above the bar, in DIPs. The content
-            // scroll viewer absorbs a shortened panel.
-            var bottom = taskbarTop > 0 ? taskbarTop : screen.Bounds.Y + screen.Bounds.Height;
-            var availableWidth = (screen.Bounds.Width / DesktopScaling) - 12;
-            var availableHeight = ((bottom - screen.Bounds.Y) / DesktopScaling) - 8;
-            Width = Math.Min(BaseWidth * factor, availableWidth);
-            Height = Math.Min(BaseHeight * factor, availableHeight);
-        }
-        // Sizes must be final before the dock computes the position.
-        UpdateLayout();
-    }
-
-    /// <summary>Places the panel just above the taskbar, at the right-hand end
+    /// <summary>Places the panel just below the sheet header, at the right-hand end
     /// where its tiles are.
     ///
     /// Without this the window opens wherever Windows decides, which is the
     /// top-left corner — nowhere near the button that opened it. The bar's own
     /// height is measured rather than assumed, because it is content-sized and
     /// DPI-scaled.</summary>
-    /// <param name="taskbarTop">The bar's top edge in physical screen pixels, or
+    /// <param name="anchorBottom">The bar's top edge in physical screen pixels, or
     /// 0 when it is not on screen.</param>
-    internal void DockAboveTaskbar(int taskbarTop = 0)
-    {
-        ApplyTouchScale(taskbarTop);
-        var screen = Screens.Primary ?? (Screens.ScreenCount > 0 ? Screens.All[0] : null);
-        if (screen is null)
-        {
-            return;
-        }
-        var area = screen.Bounds;
-        // Window scaling, not screen.Scaling — the screens cache reports the
-        // pre-game-mode factor after the runtime display-scale flip, which is
-        // exactly when this window positions itself, and a wrong factor here
-        // parked the panel far from the bar (device-reported).
-        var scale = DesktopScaling;
-        var width = (int)Math.Round(Width * scale);
-        var height = (int)Math.Round(Height * scale);
-        // Small and deliberate: the panel should look attached to the bar, not
-        // floating above it.
-        var gap = (int)Math.Round(2 * scale);
-        var margin = (int)Math.Round(6 * scale);
-
-        // Measured against the bar's ACTUAL top edge rather than derived from the
-        // working area. The bar is a topmost window, not a registered appbar, so
-        // the working area does not account for it — deriving the position from
-        // screen height and bar height double-counted and left a visible gap.
-        var bottom = taskbarTop > 0 ? taskbarTop : area.Y + area.Height;
-
-        // Right-aligned, mirroring where the tiles are and where Windows puts
-        // its own quick settings.
-        var x = area.X + area.Width - width - margin;
-        var y = bottom - height - gap;
-        // Never let it run off the top of a short display.
-        if (y < area.Y)
-        {
-            y = area.Y;
-        }
-        Position = new PixelPoint(x, y);
-    }
+    /// <param name="anchorRight">The bar's right edge in physical screen pixels, or 0.</param>
+    internal void DockBelowHeader(int anchorBottom, int anchorRight) => StatusPanel.DockBelowHeader(
+        this, RootScale, _uiScale, BaseWidth, BaseHeight, anchorBottom, anchorRight, "Radio");
 
     /// <summary>Scrolls a newly focused row (or its action button) into the
     /// viewport. A no-op when it is already fully visible.</summary>
-    private void OnRowGotFocus(object? sender, Avalonia.Input.FocusChangedEventArgs e)
-    {
-        if (e.Source is Control control && control is not ScrollViewer)
-        {
-            control.BringIntoView();
-        }
-    }
-
-    private static IntPtr WndProcHook(
-        IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, ref bool handled)
-    {
-        if (msg is Interop.NativeMethods.WmMouseMove
-                or Interop.NativeMethods.WmLButtonDown
-                or Interop.NativeMethods.WmLButtonUp)
-        {
-            var extra = (uint)Interop.NativeMethods.GetMessageExtraInfo();
-            if ((extra & Interop.NativeMethods.MiWpSignatureMask)
-                == Interop.NativeMethods.MiWpSignature)
-            {
-                handled = true;
-                return IntPtr.Zero;
-            }
-        }
-        return IntPtr.Zero;
-    }
-
     /// <summary>Shows the Wi-Fi or Bluetooth tab. Lets an already-open panel
     /// honour the tile that was tapped instead of staying on whichever tab it
     /// happened to open on.</summary>
@@ -279,31 +165,32 @@ public partial class RadioWindow : Window
         _applyingSwitch = false;
     }
 
-    // The radio manager's user-action calls reach WSGM.Radio.dll directly, so a
-    // missing or mismatched helper throws out of these async void handlers — i.e.
-    // unhandled, killing the shell process. A radio action must never do that:
-    // log it and leave the panel usable.
-    private static async Task RunRadioActionAsync(Task action, string operation)
+    // Invoke inside the try as well as awaiting inside it: WinRT-backed methods
+    // can fail synchronously before they return a Task.
+    private async Task RunRadioActionAsync(Func<Task> action, string operation)
     {
         try
         {
-            await action;
+            await action();
         }
         catch (Exception ex)
         {
             Log.Warn($"Radio panel {operation} failed: {ex.Message}");
+            _radios.ReportStatus($"{operation} failed: {ex.Message}");
         }
     }
 
-    private async void OnRadioSwitchToggled(object? sender, RoutedEventArgs e)
+    private void OnRadioSwitchToggled(object? sender, RoutedEventArgs e)
     {
         if (_applyingSwitch)
         {
             return;
         }
         var on = RadioSwitch.IsChecked == true;
-        await RunRadioActionAsync(_radios.SetRadioAsync(OnBluetoothTab, on),
-            $"{(OnBluetoothTab ? "Bluetooth" : "Wi-Fi")} power {(on ? "on" : "off")}");
+        var bluetooth = OnBluetoothTab;
+        _ = RunRadioActionAsync(
+            () => _radios.SetRadioAsync(bluetooth, on),
+            $"{(bluetooth ? "Bluetooth" : "Wi-Fi")} power {(on ? "on" : "off")}");
     }
 
     /// <summary>Selecting a network reveals its actions. It never connects or
@@ -321,7 +208,7 @@ public partial class RadioWindow : Window
         }
     }
 
-    private async void OnNetworkAction(object? sender, RoutedEventArgs e)
+    private void OnNetworkAction(object? sender, RoutedEventArgs e)
     {
         if ((sender as Control)?.DataContext is not WifiNetworkEntry entry)
         {
@@ -329,7 +216,7 @@ public partial class RadioWindow : Window
         }
         if (entry.Connected)
         {
-            await RunRadioActionAsync(_radios.DisconnectAsync(), "Wi-Fi disconnect");
+            _ = RunRadioActionAsync(() => _radios.DisconnectAsync(), "Wi-Fi disconnect");
             return;
         }
         if (entry.Security == WifiSecurity.Enterprise)
@@ -337,6 +224,9 @@ public partial class RadioWindow : Window
             // 802.1X needs an EAP profile and a credential flow this panel has no
             // business guessing at; say so rather than failing obscurely later.
             Log.Info($"Wi-Fi connect: {entry.Ssid} skipped, enterprise networks are not supported.");
+            _radios.ReportStatus(
+                $"{entry.Ssid} uses enterprise Wi-Fi, which this panel cannot configure. "
+                + "Connect from Windows Settings in desktop mode.");
             return;
         }
         if (entry.NeedsPassword)
@@ -345,15 +235,16 @@ public partial class RadioWindow : Window
             ShowPrompt(PromptMode.WifiPassword, $"Connect to {entry.Ssid}", "Enter the network password.");
             return;
         }
-        await RunRadioActionAsync(_radios.ConnectAsync(entry.Ssid, null),
+        _ = RunRadioActionAsync(
+            () => _radios.ConnectAsync(entry.Ssid, null),
             $"Wi-Fi connect to {entry.Ssid}");
     }
 
-    private async void OnNetworkForget(object? sender, RoutedEventArgs e)
+    private void OnNetworkForget(object? sender, RoutedEventArgs e)
     {
         if ((sender as Control)?.DataContext is WifiNetworkEntry entry)
         {
-            await RunRadioActionAsync(_radios.ForgetAsync(entry.Ssid),
+            _ = RunRadioActionAsync(() => _radios.ForgetAsync(entry.Ssid),
                 $"Wi-Fi forget {entry.Ssid}");
         }
     }
@@ -373,7 +264,7 @@ public partial class RadioWindow : Window
     /// <summary>The primary action: pair a stranger, or soft-connect/disconnect
     /// a paired audio device. Never unpairs — that is the Remove button's job,
     /// so a tap meant as "disconnect" can never destroy the pairing.</summary>
-    private async void OnDeviceAction(object? sender, RoutedEventArgs e)
+    private void OnDeviceAction(object? sender, RoutedEventArgs e)
     {
         if ((sender as Control)?.DataContext is not BluetoothDeviceEntry entry || entry.Busy)
         {
@@ -381,22 +272,26 @@ public partial class RadioWindow : Window
         }
         if (!entry.Paired)
         {
-            _radios.BeginPairing(entry);
+            _ = RunRadioActionAsync(() =>
+            {
+                _radios.BeginPairing(entry);
+                return Task.CompletedTask;
+            }, $"Bluetooth pairing for {entry.Name}");
             return;
         }
         if (entry.AudioConnectable)
         {
-            await RunRadioActionAsync(
-                _radios.SetAudioConnectionAsync(entry, connect: !entry.AudioActive),
+            _ = RunRadioActionAsync(
+                () => _radios.SetAudioConnectionAsync(entry, connect: !entry.AudioActive),
                 $"Bluetooth audio {(entry.AudioActive ? "disconnect" : "connect")} for {entry.Name}");
         }
     }
 
-    private async void OnDeviceRemove(object? sender, RoutedEventArgs e)
+    private void OnDeviceRemove(object? sender, RoutedEventArgs e)
     {
         if ((sender as Control)?.DataContext is BluetoothDeviceEntry { Busy: false } entry)
         {
-            await RunRadioActionAsync(_radios.UnpairAsync(entry), $"Bluetooth unpair {entry.Name}");
+            _ = RunRadioActionAsync(() => _radios.UnpairAsync(entry), $"Bluetooth unpair {entry.Name}");
         }
     }
 
@@ -416,22 +311,25 @@ public partial class RadioWindow : Window
         _promptToken = prompt.Token;
         switch (prompt.Kind)
         {
-            case 2: // provide-pin: the device shows a code, the user types it here
+            case WindowsRadio.PairingKind.ProvidePin:
+                // The device shows a code, the user types it here.
                 ShowPrompt(
                     PromptMode.PairingPin,
                     $"Pair with {prompt.DeviceName}",
                     "Enter the PIN shown on the device.");
                 break;
-            case 1: // display-pin: we show it, the user types it on the device
-            case 3: // confirm-pin-match: both sides show it, the user confirms
+            case WindowsRadio.PairingKind.DisplayPin:
+            case WindowsRadio.PairingKind.ConfirmPinMatch:
+                // Display-pin: we show it, the user types it on the device.
+                // Confirm-pin-match: both sides show it, the user confirms.
                 ShowPrompt(
                     PromptMode.PairingConfirm,
                     $"Pair with {prompt.DeviceName}",
-                    prompt.Kind == 1
+                    prompt.Kind == WindowsRadio.PairingKind.DisplayPin
                         ? $"Enter this PIN on the device: {prompt.Pin}"
                         : $"Does the device show {prompt.Pin}?");
                 break;
-            default: // confirm-only
+            default: // Confirm-only, and an unrecognized ceremony.
                 ShowPrompt(
                     PromptMode.PairingConfirm,
                     $"Pair with {prompt.DeviceName}",
@@ -480,15 +378,14 @@ public partial class RadioWindow : Window
         ShowTab(Tabs.SelectedIndex);
     }
 
-    private async void OnPromptAccept(object? sender, RoutedEventArgs e)
+    private void OnPromptAccept(object? sender, RoutedEventArgs e)
     {
         var mode = _prompt;
         var text = PromptInput.Text ?? "";
         var ssid = _promptSsid;
         var token = _promptToken;
-        // An empty PIN cannot answer the provide-pin ceremony: the helper reads
-        // it as the no-PIN Accept overload, so the pairing fails for a reason
-        // the user never sees. Keep the prompt open instead.
+        // An empty PIN cannot answer the provide-pin ceremony. Keep the prompt
+        // open instead of asking WinRT to accept with the wrong overload.
         if (mode == PromptMode.PairingPin && text.Length == 0)
         {
             PromptDetail.Text = "Enter the PIN shown on the device to continue.";
@@ -499,7 +396,7 @@ public partial class RadioWindow : Window
         switch (mode)
         {
             case PromptMode.WifiPassword:
-                await RunRadioActionAsync(_radios.ConnectAsync(ssid, text),
+                _ = RunRadioActionAsync(() => _radios.ConnectAsync(ssid, text),
                     $"Wi-Fi connect to {ssid}");
                 break;
             case PromptMode.PairingPin:

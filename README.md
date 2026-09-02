@@ -11,14 +11,15 @@ Windows shell the whole time.
 
 - **Boot to Big Picture** — a logon service starts game mode at sign-in behind a splash screen;
   switching to the desktop and back is one press, any time.
-- **Quick access panel** — a controller- and touch-driven sidebar: session control, tools, and power
-  actions, docked so the game stays visible.
-- **Game-mode taskbar** — open windows, tray icons, Wi-Fi/Bluetooth state, battery, and a clock.
+- **Quick access sheet** — one controller- and touch-driven surface that slides down from the top
+  edge and leaves the game visible below: a home tab of rows you pin yourself, session control,
+  Steam and device tools, power actions, your open programs, tray icons, Wi-Fi/Bluetooth state,
+  battery, and a clock. Left and right edges stay Steam's own menus, exactly like SteamOS.
 - **Wi-Fi & Bluetooth** — join networks and pair controllers/headsets without leaving game mode
   (Windows' own flyouts can't open there).
-- **Audio** — volume and output-device switching from the taskbar, plus an on-screen indicator for
+- **Audio** — volume and output-device switching from the sheet, plus an on-screen indicator for
   hardware volume keys.
-- **Safe Eject** — remove SD cards and USB drives cleanly from the taskbar.
+- **Safe Eject** — remove SD cards and USB drives cleanly from the sheet.
 - **Library tabs** — build custom tabs for Steam's library from filters (installed, tags, playtime,
   size, title patterns, …), reorder the whole tab strip, and hide Steam's built-in tabs.
 - **SD card & external drive libraries** — every removable Steam library gets its own tab that
@@ -55,7 +56,7 @@ The quick access sidebar, and switching between game mode and the desktop:
 
 https://github.com/user-attachments/assets/4e422b98-cf27-4f17-aa46-b8c956ce7275
 
-The game-mode taskbar:
+The 1.x game-mode taskbar (2.0 merges it into the quick access sheet):
 
 https://github.com/user-attachments/assets/c90e6354-5d05-46c5-9866-d5f8a647cbcb
 
@@ -121,8 +122,8 @@ Steam CEF bridge behind the library features, elevation and recovery — lives i
 **Upgrading:** run the newer setup. **Uninstall:** Windows Settings → Apps → WSGM — it restores
 every machine setting it changed and removes its files.
 
-Building from source: `.\build.ps1` (needs the .NET SDK, VS C++ build tools, a Rust toolchain and
-Inno Setup 6) → `publish\WSGM-Setup-<version>.exe`.
+Building from source: `.\build.ps1` (needs the .NET SDK, Rust with the MSVC toolchain, Go, Git, a
+cgo-capable GCC, and Inno Setup 6) → `publish\WSGM-Setup-<version>.exe`.
 
 ## Credits
 
@@ -140,7 +141,15 @@ tested on real handheld hardware before release.
 
 ## License
 
-MIT with one addition ([full text](LICENSE)): **device manufacturers (OEMs/ODMs), system
-integrators, and resellers need prior written permission to preinstall or bundle WSGM on devices
-they sell** — in whole, in part, modified, forked, or as code inside their own preinstalled
-software. Permission requests: git@kpc.bz. For everyone else, nothing changes from ordinary MIT.
+Copyright (C) 2026 NightHammer1000.
+
+WSGM is free software: you can redistribute it and/or modify it under the terms of the **GNU General
+Public License as published by the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version** ([full text](LICENSE)).
+
+WSGM is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+License for more details.
+
+Bundled third-party components keep their own licenses; their notices ship beside the executable and
+with the installer.

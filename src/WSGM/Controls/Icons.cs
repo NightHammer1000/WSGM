@@ -2,12 +2,11 @@ using Avalonia.Media;
 
 namespace WSGM.Controls;
 
-/// <summary>Application vector icons as cached <see cref="StreamGeometry"/> instances,
-/// replacing the Unicode/emoji glyph TextBlocks of the old UI. Each geometry is authored
-/// on a 24x24 viewbox as stroke-style path data (render with a ~2 px stroke and no fill,
-/// e.g. via <c>Path</c> or <c>CardButton.IconGeometry</c>) and parsed exactly once from
-/// its path string — plain string parsing, fully NativeAOT-safe (same approach as
-/// <see cref="WSGM.Overlay.GlyphIcon"/>).</summary>
+/// <summary>Application vector icons as cached <see cref="StreamGeometry"/> instances.
+/// Each geometry is authored on a 24x24 viewbox as stroke-style path data (render with
+/// a ~2 px stroke and no fill, e.g. via <c>Path</c> or <c>CardButton.IconGeometry</c>)
+/// and parsed exactly once from its path string — plain string parsing with no external
+/// asset decoder (same approach as <see cref="WSGM.Overlay.GlyphIcon"/>).</summary>
 public static class Icons
 {
     /// <summary>Play triangle (start / resume, Big Picture home action).</summary>
@@ -144,6 +143,11 @@ public static class Icons
     public static StreamGeometry Panel { get; } =
         StreamGeometry.Parse(
             "M 3,5 L 21,5 L 21,19 L 3,19 Z M 15,5 L 15,19 M 17,8.5 L 19,8.5 M 17,11.5 L 19,11.5");
+
+    /// <summary>Push pin marking a row that is present on the Quick access root.</summary>
+    public static StreamGeometry Pin { get; } =
+        StreamGeometry.Parse(
+            "M 8,3 L 16,3 M 9,3 L 9,9 L 6,12 L 18,12 L 15,9 L 15,3 M 12,12 L 12,21");
 
     /// <summary>Painter's palette with four paint wells (appearance).</summary>
     public static StreamGeometry Palette { get; } =

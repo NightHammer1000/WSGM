@@ -1,8 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
-using Avalonia.Input.Platform;
 using Avalonia.Media;
 using Avalonia.Threading;
 using WSGM.Controls;
@@ -10,18 +10,23 @@ using WSGM.Core;
 
 namespace WSGM.Overlay;
 
-/// <summary>Base for the self-drawing, gamepad-driven Tools sub-views (tab builder,
-/// card manager): the render-thunk navigation stack, the shared row/label builders,
-/// and text entry. Each navigation level rebuilds <see cref="ContentControl.Content"/>,
-/// and every interactive element is a <see cref="Button"/> so D-pad navigation and A/B
-/// work with no extra focus plumbing.</summary>
+/// <summary>Base for the self-drawing, gamepad-driven overlay sub-views (tab builder,
+/// card manager, artwork changer, launch wrappers, wake locks): the render-thunk
+/// navigation stack, the shared row/label builders, and text entry. Each navigation
+/// level rebuilds <see cref="ContentControl.Content"/>, and every interactive element is
+/// a <see cref="Button"/> so D-pad navigation and A/B work with no extra focus plumbing.
+/// <para><see cref="_navigationGeneration"/> is also the invalidation token for
+/// asynchronous work: leaving a level bumps it, so a load that completes afterwards
+/// discards its result instead of drawing over the level the user moved to.</para></summary>
 public abstract class OverlaySubView : UserControl
 {
     // Navigation: a stack of render thunks. Push goes deeper; Back pops.
-    private protected readonly System.Collections.Generic.Stack<Action> _stack = new();
+    private protected readonly Stack<Action> _stack = new();
     private protected Action? _current;
     private protected int _navigationGeneration;
-    private string? _notice;
+
+    // One-shot message shown at the top of the next rendered level, then consumed.
+    private protected string? _notice;
 
     /// <summary>Raised when the user backs out of the top level (the overlay then
     /// returns to the Tools list).</summary>
@@ -29,6 +34,10 @@ public abstract class OverlaySubView : UserControl
 
     /// <summary>Short name used to prefix log lines from this sub-view.</summary>
     protected abstract string LogScope { get; }
+
+    /// <summary>Asks the host to close this sub-view, for the rows that offer an explicit
+    /// way out rather than waiting for a Back press.</summary>
+    private protected void RequestClose() => CloseRequested?.Invoke();
 
     /// <summary>Handles a Back/B press: pops one level, or requests close at the top.
     /// Returns true when it consumed the press.</summary>
@@ -76,6 +85,21 @@ public abstract class OverlaySubView : UserControl
         catch (Exception ex) { Log.Error($"{LogScope} {operation} failed.", ex); }
     }
 
+    /// <summary>Lists the Steam library, degrading to an empty list so a picker renders
+    /// "no games" instead of failing the whole sub-view when Steam cannot answer.</summary>
+    private protected async Task<IReadOnlyList<SteamCollections.AppInfo>> SafeGamesAsync()
+    {
+        try
+        {
+            return await SteamCollections.GetGamesAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"{LogScope}: could not list games: {ex.Message}");
+            return [];
+        }
+    }
+
     private protected void Toast(string message)
     {
         Log.Info($"{LogScope}: {message}");
@@ -106,12 +130,14 @@ public abstract class OverlaySubView : UserControl
         return stack;
     }
 
-    private protected void RenderLoading(string title)
+    private protected void RenderMessage(string heading, string message)
     {
-        var stack = NewStack(title);
-        stack.Children.Add(Caption("Loading from Steam…"));
+        var stack = NewStack(heading);
+        stack.Children.Add(Caption(message));
         SetContent(stack);
     }
+
+    private protected void RenderLoading(string title) => RenderMessage(title, "Loading from Steam…");
 
     private protected CardButton Row(string title, string desc, Geometry? icon, Action? onClick)
     {
@@ -157,12 +183,15 @@ public abstract class OverlaySubView : UserControl
 
     // No inner ScrollViewer: the overlay's ContentScroller owns scrolling and its
     // GotFocus→BringIntoView keeps the focused control (incl. keyboard keys) on screen.
-    private protected void SetContent(StackPanel stack)
+    // A nested scroller would swallow that scroll-into-view.
+    private protected virtual void SetContent(StackPanel stack)
     {
         Content = stack;
         FocusFirst(stack);
     }
 
+    // A row laid out inside a panel (a Grid of columns, a WrapPanel of thumbnails) is
+    // still the first thing the user should land on, so the search descends one level.
     private protected void FocusFirst(StackPanel stack) => Dispatcher.UIThread.Post(() =>
     {
         foreach (var child in stack.Children)
@@ -172,13 +201,13 @@ public abstract class OverlaySubView : UserControl
                 b.Focus(NavigationMethod.Directional);
                 return;
             }
-            if (child is Grid grid)
+            if (child is Panel panel)
             {
-                foreach (var gc in grid.Children)
+                foreach (var nested in panel.Children)
                 {
-                    if (gc is Button gb)
+                    if (nested is Button nestedButton)
                     {
-                        gb.Focus(NavigationMethod.Directional);
+                        nestedButton.Focus(NavigationMethod.Directional);
                         return;
                     }
                 }
@@ -190,14 +219,10 @@ public abstract class OverlaySubView : UserControl
 
     private protected void EditText(string title, string current, int maxLen, Action<string> onAccept)
     {
-        // Prefer the separate keyboard window beside the sidebar (game mode); fall back
-        // to an inline keyboard screen if none is available.
-        //
-        // Accept ordering matters on both paths: the rows show values straight off the
-        // model, so the mutation has to land BEFORE anything re-renders or the user sees
-        // the old text. The keyboard path pushes no navigation level (the window is a
-        // peer, not a screen), so it must re-render the current level itself instead of
-        // relying on a pop to do it.
+        // Accept ordering matters: the rows show values straight off the model, so the mutation
+        // has to land BEFORE anything re-renders or the user sees the old text. The keyboard
+        // window pushes no navigation level (it is a peer, not a screen), so this re-renders the
+        // current level itself instead of relying on a pop to do it.
         if (KeyboardService.Request(title, current, maxLen, v =>
         {
             onAccept(v ?? "");
@@ -206,34 +231,13 @@ public abstract class OverlaySubView : UserControl
         {
             return;
         }
-        Navigate(() =>
-        {
-            var stack = NewStack(title);
-            var box = new TextBox { Text = current, MaxLength = maxLen, Margin = new Avalonia.Thickness(0, 0, 0, 6) };
-            stack.Children.Add(box);
-            var keyboard = new OnScreenKeyboard { Target = box };
-            keyboard.PasteRequested += async (_, _) =>
-            {
-                try
-                {
-                    var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-                    var text = clipboard is null ? null : await clipboard.TryGetTextAsync();
-                    if (!string.IsNullOrEmpty(text))
-                    {
-                        keyboard.InsertExternalText(text);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log.Warn($"{LogScope}: keyboard paste failed: {ex.Message}");
-                }
-            };
-            keyboard.Accepted += (_, _) => { onAccept(box.Text ?? ""); Back(); };
-            stack.Children.Add(keyboard);
-            stack.Children.Add(PrimaryRow("Accept", "Save this text", Icons.Play,
-                () => { onAccept(box.Text ?? ""); Back(); }));
-            stack.Children.Add(Row("Cancel", "Discard", Icons.ExitFullscreen, () => Back()));
-            SetContent(stack);
-        });
+
+        // No keyboard surface means there is no way to type at all, so say so. The alternative —
+        // a screen carrying a bare TextBox — is unusable here by design: GamepadNavigation skips
+        // TextBoxes so the Windows touch keyboard cannot pop, which means focus never lands on it
+        // and nothing types. See "Text entry in the panel is a press-to-edit ROW" in
+        // docs\overlay-and-input.md.
+        Log.Warn($"{LogScope}: cannot edit '{title}' — no keyboard surface is available.");
+        Toast("Text entry needs the overlay keyboard, which is not available.");
     }
 }

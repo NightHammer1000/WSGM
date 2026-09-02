@@ -292,23 +292,35 @@ internal static class LaunchWrapperCommand
 
     /// <summary>Stops any running wrapper processes.</summary>
     /// <param name="reason">Why they are being stopped, for the log.</param>
-    internal static void StopRunningHelpers(string reason)
+    internal static void StopRunningHelpers(string reason) =>
+        StopRunningHelpers(reason, timeout: null);
+
+    /// <summary>Stops running wrappers while sharing one optional caller-owned wait budget.</summary>
+    /// <param name="reason">Why they are being stopped, for the log.</param>
+    /// <param name="timeout">Maximum combined process-exit wait, or null for the ordinary per-process bound.</param>
+    internal static void StopRunningHelpers(string reason, TimeSpan timeout) =>
+        StopRunningHelpers(reason, (TimeSpan?)timeout);
+
+    private static void StopRunningHelpers(string reason, TimeSpan? timeout)
     {
-        foreach (var process in Process.GetProcessesByName(
+        int currentSession = Process.GetCurrentProcess().SessionId;
+        foreach (Process process in Process.GetProcessesByName(
                      Path.GetFileNameWithoutExtension(HelperFileName)))
         {
             try
             {
-                Log.Info($"Stopping launch wrapper pid {process.Id} ({reason}).");
-                // The medium child owns the launched game/emulator. Ending its
-                // complete tree releases both the wrapper executable and target
-                // before an update/uninstall replaces or removes the helper.
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit(5_000);
+                if (process.SessionId != currentSession)
+                {
+                    continue;
+                }
+
+                Log.Warn(
+                    $"Launch wrapper pid {process.Id} is still active ({reason}); setup must "
+                        + "defer replacement until its game exits.");
             }
             catch (Exception ex)
             {
-                Log.Warn($"Could not stop launch wrapper pid {process.Id}: {ex.Message}");
+                Log.Warn($"Could not inspect launch wrapper pid {process.Id}: {ex.Message}");
             }
             finally
             {
@@ -331,7 +343,7 @@ internal static class LaunchWrapperCommand
         {
             throw new ArgumentException("A helper path is required.", nameof(path));
         }
-        return $"\"{path}\"";
+        return SteamCustomLaunchCommand.Quote(path);
     }
 
     private static string FlagsFor(LaunchWrapperMode mode)

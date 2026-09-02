@@ -13,6 +13,7 @@ internal static class Program
 {
     private const string ChildArgument = "--medium-child";
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan LaunchReportTimeout = TimeSpan.FromMinutes(2);
 
     // Carried in the medium child's failure message so the elevated parent can tell
     // "de-elevation is impossible on this machine" (UAC off) from a transient error
@@ -235,8 +236,10 @@ internal static class Program
             await pipe.WaitForConnectionAsync(handshake.Token);
             // /Run has already created the helper process; deleting the task does
             // not terminate its running action and prevents stale task buildup.
-            ScheduledTaskLauncher.Delete(taskName);
-            taskName = null;
+            if (ScheduledTaskLauncher.Delete(taskName))
+            {
+                taskName = null;
+            }
 
             // The child reports its readiness before anything else, and this read
             // has to come before the payload write: the protocol only stays
@@ -258,10 +261,14 @@ internal static class Program
             await payload.WriteAsync(pipe, handshake.Token);
             await pipe.FlushAsync(handshake.Token);
 
-            var started = await PipeProtocol.ReadInt32Async(pipe, handshake.Token);
+            // Process creation is deliberately outside the readiness/payload deadline. On-access
+            // scanning of a large executable can exceed 20 seconds without meaning the helper is
+            // wedged; abandoning the pipe then would make the child kill a correctly started game.
+            using var launchReport = new CancellationTokenSource(LaunchReportTimeout);
+            var started = await PipeProtocol.ReadInt32Async(pipe, launchReport.Token);
             if (started == 0)
             {
-                var error = await PipeProtocol.ReadStringAsync(pipe, 64 * 1024, handshake.Token);
+                var error = await PipeProtocol.ReadStringAsync(pipe, 64 * 1024, launchReport.Token);
                 LaunchLog.Error($"Medium-integrity launch failed: {error}");
                 return await FailOpenOrGiveUpAsync(error, payload);
             }
@@ -271,7 +278,7 @@ internal static class Program
                 return 1;
             }
 
-            var processId = await PipeProtocol.ReadInt32Async(pipe, handshake.Token);
+            var processId = await PipeProtocol.ReadInt32Async(pipe, launchReport.Token);
             LaunchLog.Info($"Medium-integrity target started (pid {processId}); waiting for exit.");
             // No timeout after launch: Steam expects its launch-option wrapper to
             // remain alive for the entire game/emulator lifetime.
@@ -364,7 +371,10 @@ internal static class Program
             using var process = Start(payload);
             if (process is null)
             {
-                await WriteLaunchFailureAsync(pipe, "Process.Start returned no process.", handshake.Token);
+                await WriteLaunchFailureAsync(
+                    pipe,
+                    "Process.Start returned no process.",
+                    CancellationToken.None);
                 return 1;
             }
 
@@ -373,6 +383,19 @@ internal static class Program
             // child seconds in, which releases the elevated parent's Steam Input
             // lease mid-session and tells Steam the game stopped.
             using var job = JobObject.TryCapture(process.Handle);
+            if (job is null)
+            {
+                LaunchLog.Error(
+                    $"Target pid {process.Id} could not be captured before wrapper publication; "
+                        + "stopping it rather than running an untracked game tree.");
+                StopTargetTree(process, job);
+                await WaitForExitBoundedAsync(process).ConfigureAwait(false);
+                await WriteLaunchFailureAsync(
+                    pipe,
+                    "The target process tree could not be captured safely.",
+                    CancellationToken.None).ConfigureAwait(false);
+                return 1;
+            }
 
             // The handshake deadline covers connecting, readiness and the payload
             // read, but must not cover this response: a slow CreateProcess (an
@@ -392,29 +415,29 @@ internal static class Program
                 LaunchLog.Error($"Could not report the started target pid {process.Id} to the Steam " +
                                 $"wrapper: {ex.Message}; stopping its process tree.");
                 StopTargetTree(process, job);
-                await process.WaitForExitAsync();
+                await WaitForExitBoundedAsync(process).ConfigureAwait(false);
                 return 1;
             }
             launchResponseSent = true;
             LaunchLog.Info($"Launched {Path.GetFileName(payload.Arguments[0])} at medium integrity " +
                               $"(pid {process.Id}); preserving Steam wrapper lifetime" +
-                              $"{(job is null ? "" : " for its process tree")}.");
+                              " for its process tree.");
 
             using var disconnectCancellation = new CancellationTokenSource();
             var parentDisconnected = WaitForParentDisconnectAsync(pipe, disconnectCancellation.Token);
             using var treeCancellation = new CancellationTokenSource();
-            var targetFinished = job is null
-                ? process.WaitForExitAsync()
-                : WaitForTreeAsync(process, job, treeCancellation.Token);
+            var targetFinished = WaitForTreeAsync(process, job, treeCancellation.Token);
             var completed = await Task.WhenAny(targetFinished, parentDisconnected);
             if (completed == parentDisconnected)
             {
                 LaunchLog.Info($"Steam wrapper exited before target pid {process.Id}; stopping its process tree.");
                 treeCancellation.Cancel();
                 StopTargetTree(process, job);
-                await process.WaitForExitAsync();
+                await WaitForExitBoundedAsync(process).ConfigureAwait(false);
                 return 1;
             }
+
+            await targetFinished.ConfigureAwait(false);
 
             disconnectCancellation.Cancel();
             try { await parentDisconnected; } catch (OperationCanceledException) { }
@@ -446,9 +469,8 @@ internal static class Program
     {
         // The job reaches descendants whose intermediate parent already exited,
         // which Kill(entireProcessTree) cannot.
-        if (job is not null)
+        if (job?.TerminateTree() == true)
         {
-            job.TerminateTree();
             return;
         }
 
@@ -470,15 +492,17 @@ internal static class Program
             return 1;
         }
         using var job = JobObject.TryCapture(process.Handle);
-        LaunchLog.Info($"Wrapper already has medium integrity; target started directly (pid {process.Id}).");
         if (job is null)
         {
-            await process.WaitForExitAsync();
+            LaunchLog.Error(
+                $"Target pid {process.Id} could not be captured; stopping it rather than "
+                    + "running an untracked game tree.");
+            StopTargetTree(process, job);
+            await WaitForExitBoundedAsync(process).ConfigureAwait(false);
+            return 1;
         }
-        else
-        {
-            await WaitForTreeAsync(process, job, CancellationToken.None);
-        }
+        LaunchLog.Info($"Wrapper already has medium integrity; target started directly (pid {process.Id}).");
+        await WaitForTreeAsync(process, job, CancellationToken.None);
         return process.ExitCode;
     }
 
@@ -488,8 +512,33 @@ internal static class Program
     private static async Task WaitForTreeAsync(
         Process process, JobObject job, CancellationToken cancellationToken)
     {
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        await job.WaitUntilEmptyAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await job.WaitUntilEmptyAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            StopTargetTree(process, job);
+            await WaitForExitBoundedAsync(process).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static async Task WaitForExitBoundedAsync(Process process)
+    {
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            LaunchLog.Error($"Target pid {process.Id} did not exit within five seconds after termination.");
+        }
+        catch (InvalidOperationException)
+        {
+            // The process already exited before a wait handle could be opened.
+        }
     }
 
     internal static Process? Start(LaunchPayload payload)

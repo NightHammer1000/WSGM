@@ -12,9 +12,9 @@
     <ApplicationIcon>..\WSGM\Assets\wsgm.ico</ApplicationIcon>
     <AssemblyName>WSGM.LogonService</AssemblyName>
     <RootNamespace>WSGM.LogonService</RootNamespace>
-    <PublishAot>true</PublishAot>
-    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <DebugType>none</DebugType>
   </PropertyGroup>
   <ItemGroup>

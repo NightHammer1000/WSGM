@@ -48,7 +48,8 @@ public static class SteamArtwork
         }
         if (asset == ArtworkAsset.Icon)
         {
-            return ApplyIcon(appId, imageBytes, ext);
+            return new ArtworkResult(false,
+                "Steam icons use a versioned per-app cache and cannot be changed safely here yet.");
         }
 
         var b64 = await Task.Run(() => Convert.ToBase64String(imageBytes), cancellationToken)
@@ -64,7 +65,7 @@ public static class SteamArtwork
             "return JSON.stringify({ok:true});}" +
             "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
 
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         return Interpret(result, "Artwork applied.");
     }
@@ -86,18 +87,9 @@ public static class SteamArtwork
             "(async()=>{try{await SteamClient.Apps.ClearCustomArtworkForApp(" + app + "," + type + ");" +
             "return JSON.stringify({ok:true});}" +
             "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         return Interpret(result, "Reset to official art.");
-    }
-
-    private static ArtworkResult ApplyIcon(long appId, byte[] bytes, string ext)
-    {
-        _ = appId;
-        _ = bytes;
-        _ = ext;
-        return new ArtworkResult(false,
-            "Steam icons use a versioned per-app cache and cannot be changed safely here yet.");
     }
 
     // appStore uses the unsigned 32-bit app id; a shortcut id stored in a signed int

@@ -47,7 +47,8 @@ public static class AppLauncher
     {
         try
         {
-            Process.Start(new ProcessStartInfo(protocol) { UseShellExecute = true });
+            using Process? activation = Process.Start(
+                new ProcessStartInfo(protocol) { UseShellExecute = true });
             Log.Info($"Started protocol: {protocol}");
             return new LaunchResult(null, true, false);
         }
@@ -68,7 +69,8 @@ public static class AppLauncher
     {
         try
         {
-            Process.Start(new ProcessStartInfo(path, args) { UseShellExecute = true });
+            using Process? activation = Process.Start(
+                new ProcessStartInfo(path, args) { UseShellExecute = true });
             Log.Info($"Started via shell: {path}{(args.Length == 0 ? "" : " " + args)}");
             return new LaunchResult(null, true, false);
         }

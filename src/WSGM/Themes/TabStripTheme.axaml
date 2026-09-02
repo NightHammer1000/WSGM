@@ -19,15 +19,13 @@
                         <Grid ColumnDefinitions="Auto,*,Auto">
                             <Border Grid.Column="0"
                                     Classes="tab-strip-bumper"
-                                    Margin="0,0,10,0"
-                                    IsVisible="{TemplateBinding ShowBumperHints}">
+                                    Margin="0,0,10,0">
                                 <TextBlock Text="LB" />
                             </Border>
                             <UniformGrid Name="PART_TabsHost" Grid.Column="1" Rows="1" />
                             <Border Grid.Column="2"
                                     Classes="tab-strip-bumper"
-                                    Margin="10,0,0,0"
-                                    IsVisible="{TemplateBinding ShowBumperHints}">
+                                    Margin="10,0,0,0">
                                 <TextBlock Text="RB" />
                             </Border>
                         </Grid>
@@ -92,6 +90,41 @@
     </Style>
     <Style Selector="Button.tab-strip-tab.active Path.tab-strip-icon">
         <Setter Property="Stroke" Value="{StaticResource HcTextPrimaryBrush}" />
+    </Style>
+
+    <!-- The quick access sheet's variant: tabs cluster left at their natural
+         width (mock: console tab bar) instead of stretching equally, with tighter,
+         tracked, semibold labels under the uppercase destination names the window
+         supplies. Scoped by class so Settings keeps the standard strip. -->
+    <Style Selector="controls|TabStrip.sheet">
+        <Setter Property="Template">
+            <ControlTemplate>
+                <Grid ColumnDefinitions="Auto,*,Auto">
+                    <Border Grid.Column="0"
+                            Classes="tab-strip-bumper"
+                            Margin="0,0,10,0">
+                        <TextBlock Text="LB" />
+                    </Border>
+                    <StackPanel Name="PART_TabsHost"
+                                Grid.Column="1"
+                                Orientation="Horizontal"
+                                HorizontalAlignment="Left" />
+                    <Border Grid.Column="2"
+                            Classes="tab-strip-bumper"
+                            Margin="10,0,0,0">
+                        <TextBlock Text="RB" />
+                    </Border>
+                </Grid>
+            </ControlTemplate>
+        </Setter>
+    </Style>
+    <Style Selector="controls|TabStrip.sheet Button.tab-strip-tab">
+        <Setter Property="MinHeight" Value="44" />
+    </Style>
+    <Style Selector="controls|TabStrip.sheet Button.tab-strip-tab TextBlock">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="LetterSpacing" Value="1" />
     </Style>
 
     <!-- Accent underline marking the active tab -->
