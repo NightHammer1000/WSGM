@@ -1,3 +1,18 @@
+# Archival Notice
+This Repository has been Archived in Favor of https://github.com/KillerPixelCrew/WSGM which now carries the Development to 2.0
+Large Strides were made. Including the Following Features:
+- Full Device SDK and a Native Claw 8 A2VM Device Plugin
+- Desktop First mode
+- Overlay Overhaul
+- Deep Steam Integration and Revival of SteamOS Exclusive Features (WIFI, Bluetooth, Audio directly in Steam like SteamOS, Windows Native SDCard Integration in Steams Library settings. And with a Device Plugin a fully Revived QAM)
+- Revived Steams Per Game Profiles for the Perfomance QAM Tab
+- SteamOS Like Coupled FPS/Hz Limiter optimized for VRR LFC.
+- And much more.
+
+1.0 Versions can still be downloaded here and are functional.
+
+---
+
 <p align="center">
   <img src="docs/banner.svg" alt="WSGM — Windows Steam Game Mode" width="810">
 </p>
