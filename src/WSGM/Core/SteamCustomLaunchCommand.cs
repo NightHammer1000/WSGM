@@ -67,5 +67,8 @@ internal static class SteamCustomLaunchCommand
         Environment.GetFolderPath(Environment.SpecialFolder.System),
         "WindowsPowerShell", "v1.0", "powershell.exe");
 
-    private static string Quote(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
+    /// <summary>Always-wrapping quote for Steam-facing command strings (Launch Options and
+    /// shortcut Target fields), shared with the launch-wrapper command builder. Distinct from
+    /// <see cref="SelfElevation.Quote"/>, which quotes conditionally for argv round-trips.</summary>
+    internal static string Quote(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
 }

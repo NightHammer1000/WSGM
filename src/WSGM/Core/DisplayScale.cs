@@ -2,99 +2,23 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using static WSGM.Interop.NativeDisplay;
 
 namespace WSGM.Core;
 
-/// <summary>Per-monitor display scaling (the 100%/125%/150% setting) via the
-/// undocumented-but-ABI-stable DisplayConfig DPI packets (types -3/-4) — the same
-/// mechanism the Settings app uses. Applies INSTANTLY, no logoff (live-verified),
-/// and PERSISTS in the registry — which is why the pre-game values are stored in
-/// WSGM's config and restored on desktop mode, clean exit, panic, and recovery.
-/// Game mode runs at 100% so DPI-unaware games render 1:1 on the panel.</summary>
-public static partial class DisplayScale
+/// <summary>Owns the display state WSGM changes through DisplayConfig packets: per-monitor
+/// scaling (the 100%/125%/150% setting) via the undocumented-but-ABI-stable DPI packets — the
+/// same mechanism the Settings app uses, applying INSTANTLY with no logoff (live-verified) and
+/// PERSISTING in the registry — and Windows HDR (advanced color) per active display. Scaling
+/// persistence is why the pre-game values are stored in WSGM's config and restored on desktop
+/// mode, clean exit, panic, and recovery. Game mode runs at 100% so DPI-unaware games render
+/// 1:1 on the panel. HDR is queried and set on the path TARGET, never the GDI source; see
+/// docs\power-and-display.md. This class also dispatches the Game/Desktop display modes;
+/// profile-based modes delegate to <see cref="DisplayProfiles"/>.</summary>
+public static unsafe class DisplayScale
 {
-    private const int GetDpiScaleType = -3;
-    private const int SetDpiScaleType = -4;
-    private const int GetSourceNameType = 1;   // DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME
-    private const uint QdcOnlyActivePaths = 0x00000002;
-    private const int ErrorInsufficientBuffer = 122;
-
     // Index 0 = 100%. Recommended = DpiVals[abs(MinScaleRel)].
     private static readonly uint[] DpiVals = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500];
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Luid { public uint LowPart; public int HighPart; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct DeviceInfoHeader
-    {
-        public int Type;
-        public uint Size;
-        public Luid AdapterId;
-        public uint Id;             // SOURCE id, not target
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct DpiScaleGet     // 0x20 bytes; field order min,cur,max (verified)
-    {
-        public DeviceInfoHeader Header;
-        public int MinScaleRel;
-        public int CurScaleRel;
-        public int MaxScaleRel;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct DpiScaleSet     // 0x18 bytes
-    {
-        public DeviceInfoHeader Header;
-        public int ScaleRel;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct PathSourceInfo { public Luid AdapterId; public uint Id; public uint ModeInfoIdx; public uint StatusFlags; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct PathTargetInfo
-    {
-        public Luid AdapterId; public uint Id; public uint ModeInfoIdx;
-        public uint OutputTechnology; public uint Rotation; public uint Scaling;
-        public uint RefreshRateNumerator; public uint RefreshRateDenominator;
-        public uint ScanLineOrdering; public int TargetAvailable; public uint StatusFlags;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct PathInfo
-    {
-        public PathSourceInfo SourceInfo;
-        public PathTargetInfo TargetInfo;
-        public uint Flags;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Size = 64)]
-    private struct ModeInfo { public uint InfoType; public uint Id; public Luid AdapterId; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private unsafe struct SourceDeviceName   // DISPLAYCONFIG_SOURCE_DEVICE_NAME, 0x54 bytes
-    {
-        public DeviceInfoHeader Header;
-        public fixed ushort ViewGdiDeviceName[32];   // UTF-16 GDI name, e.g. \\.\DISPLAY1
-    }
-
-    [LibraryImport("user32.dll")]
-    private static partial int GetDisplayConfigBufferSizes(uint flags, out uint numPaths, out uint numModes);
-
-    [LibraryImport("user32.dll")]
-    private static partial int QueryDisplayConfig(uint flags, ref uint numPaths, [In, Out] PathInfo[] paths,
-        ref uint numModes, [In, Out] ModeInfo[] modes, nint currentTopologyId);
-
-    [LibraryImport("user32.dll")]
-    private static partial int DisplayConfigGetDeviceInfo(ref DpiScaleGet packet);
-
-    [LibraryImport("user32.dll")]
-    private static partial int DisplayConfigGetDeviceInfo(ref SourceDeviceName packet);
-
-    [LibraryImport("user32.dll")]
-    private static partial int DisplayConfigSetDeviceInfo(ref DpiScaleSet packet);
 
     /// <summary>Game mode: capture ALL current per-display scalings into the config
     /// (unless a crashed session already left captured values there), persist them,
@@ -119,7 +43,7 @@ public static partial class DisplayScale
             return;
         }
 
-        var freshCapture = config.SavedDisplayScaleEntries.Count == 0 && config.SavedDisplayScales.Count == 0;
+        var freshCapture = config.SavedDisplayScaleEntries.Count == 0;
         var captured = new List<DisplayScaleEntry>();
         var toLower = new List<((Luid Adapter, uint SourceId) Source, uint Current)>();
         foreach (var source in sources)
@@ -128,7 +52,7 @@ public static partial class DisplayScale
             {
                 continue;
             }
-            var name = GetSourceDeviceName(source);
+            var name = GetSourceDeviceName(source.Adapter, source.SourceId);
             if (name.Length == 0)
             {
                 // A ""-named entry can never be matched by name on restore, so it
@@ -144,8 +68,7 @@ public static partial class DisplayScale
             // active source before recovery runs; never force that new display to
             // 100% without first owning its desktop-scale snapshot.  Existing named
             // entries are safe to lower again because their original value is still
-            // recoverable.  Legacy positional snapshots cannot identify a newly
-            // attached display, so leave all sources alone until they are restored.
+            // recoverable.
             if (ShouldLowerDisplay(freshCapture, config.SavedDisplayScaleEntries, name))
             {
                 toLower.Add((source, current));
@@ -156,7 +79,7 @@ public static partial class DisplayScale
         {
             try
             {
-                PersistScaleEntries(captured, clearLegacyList: false);
+                PersistScaleEntries(captured);
                 config.SavedDisplayScaleEntries = captured;
             }
             catch (Exception ex)
@@ -177,12 +100,12 @@ public static partial class DisplayScale
 
     /// <summary>Recovery path for clean exit, panic, uninstall and shell repair.
     /// Full-profile modes apply the last known Desktop profile without capturing;
-    /// any pending legacy DPI snapshot is restored regardless of the current mode.</summary>
+    /// any pending DPI snapshot is restored regardless of the current mode.</summary>
     public static void RestoreSaved(AppConfig config)
     {
-        // Consume a legacy DPI-only snapshot first when the user changed modes
-        // while game mode was active. A configured Desktop profile then wins as
-        // the final state rather than being overwritten by that migration cleanup.
+        // Consume a DPI-only snapshot first when the user changed modes while game
+        // mode was active. A configured Desktop profile then wins as the final
+        // state rather than being overwritten by that cleanup.
         RestoreDpiSnapshot(config);
         if (config.DisplayManagement is DisplayManagementMode.AutomaticProfiles or DisplayManagementMode.FixedProfiles)
         {
@@ -211,7 +134,7 @@ public static partial class DisplayScale
 
     private static void RestoreDpiSnapshot(AppConfig config)
     {
-        if (config.SavedDisplayScaleEntries.Count == 0 && config.SavedDisplayScales.Count == 0)
+        if (config.SavedDisplayScaleEntries.Count == 0)
         {
             return;
         }
@@ -224,22 +147,11 @@ public static partial class DisplayScale
         var named = new List<((Luid Adapter, uint SourceId) Source, string Name)>();
         foreach (var source in sources)
         {
-            named.Add((source, GetSourceDeviceName(source)));
-        }
-
-        // Migrate the legacy index-paired list (configs written before device
-        // identity existed): pair by enumeration order, as the old restore did.
-        if (config.SavedDisplayScales.Count > 0)
-        {
-            for (var i = 0; i < named.Count && i < config.SavedDisplayScales.Count; i++)
-            {
-                config.SavedDisplayScaleEntries.Add(new DisplayScaleEntry { DeviceName = named[i].Name, Percent = config.SavedDisplayScales[i] });
-            }
-            config.SavedDisplayScales = [];
+            named.Add((source, GetSourceDeviceName(source.Adapter, source.SourceId)));
         }
 
         var remaining = new List<DisplayScaleEntry>();
-        var positional = 0;   // next active source for legacy ""-named entries
+        var positional = 0;   // next active source for ""-named entries
         foreach (var entry in config.SavedDisplayScaleEntries)
         {
             if (entry.Percent is not (>= 100 and <= 500))
@@ -249,9 +161,9 @@ public static partial class DisplayScale
             if (string.IsNullOrEmpty(entry.DeviceName))
             {
                 // Written by an older build whose name query failed: "" can never
-                // match by name, so pair it positionally like the legacy
-                // index-paired list — and never re-save it, or it would block in
-                // the config forever, warned about on every restore.
+                // match by name, so pair it positionally by enumeration order —
+                // and never re-save it, or it would block in the config forever,
+                // warned about on every restore.
                 if (positional < named.Count &&
                     TrySetScale(named[positional].Source, (uint)entry.Percent))
                 {
@@ -281,7 +193,7 @@ public static partial class DisplayScale
             }
         }
         config.SavedDisplayScaleEntries = remaining;
-        try { PersistScaleEntries(remaining, clearLegacyList: true); } catch (Exception ex) { Log.Warn($"Display scale: could not persist restore: {ex.Message}"); }
+        try { PersistScaleEntries(remaining); } catch (Exception ex) { Log.Warn($"Display scale: could not persist restore: {ex.Message}"); }
     }
 
     /// <summary>Persists ONLY the display-scale snapshot, through the config store's
@@ -292,16 +204,8 @@ public static partial class DisplayScale
     /// settings the user had just saved. Callers mirror the same values onto their own
     /// instance so it stays in step with what went to disk.</summary>
     /// <param name="entries">The scale entries to persist (empty clears the snapshot).</param>
-    /// <param name="clearLegacyList">Whether the migrated index-paired list is cleared too.</param>
-    private static void PersistScaleEntries(List<DisplayScaleEntry> entries, bool clearLegacyList)
-        => ConfigStore.Mutate(fresh =>
-        {
-            fresh.SavedDisplayScaleEntries = entries;
-            if (clearLegacyList)
-            {
-                fresh.SavedDisplayScales = [];
-            }
-        });
+    private static void PersistScaleEntries(List<DisplayScaleEntry> entries)
+        => ConfigStore.Mutate(fresh => fresh.SavedDisplayScaleEntries = entries);
 
     /// <summary>The display-scale percent WSGM's own UI should render at. Game
     /// mode forces every display to 100%, which makes DIP-sized WSGM surfaces
@@ -318,7 +222,7 @@ public static partial class DisplayScale
             var sources = GetActiveSources();
             foreach (var source in sources)
             {
-                var name = GetSourceDeviceName(source);
+                var name = GetSourceDeviceName(source.Adapter, source.SourceId);
                 if (config.DisplayManagement is DisplayManagementMode.AutomaticProfiles or DisplayManagementMode.FixedProfiles)
                 {
                     var desktop = config.DisplayProfiles.Find(
@@ -377,7 +281,7 @@ public static partial class DisplayScale
         var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var source in GetActiveSources())
         {
-            var name = GetSourceDeviceName(source);
+            var name = GetSourceDeviceName(source.Adapter, source.SourceId);
             if (name.Length > 0 && TryGetScale(source, out var current, out _, out _))
             {
                 result[name] = (int)current;
@@ -390,7 +294,7 @@ public static partial class DisplayScale
     {
         foreach (var source in GetActiveSources())
         {
-            var name = GetSourceDeviceName(source);
+            var name = GetSourceDeviceName(source.Adapter, source.SourceId);
             var profile = profiles.FirstOrDefault(p => string.Equals(p.DeviceName, name, StringComparison.OrdinalIgnoreCase));
             if (profile is null)
             {
@@ -472,52 +376,14 @@ public static partial class DisplayScale
         return ok;
     }
 
-    private static unsafe string GetSourceDeviceName((Luid Adapter, uint SourceId) source)
-    {
-        var packet = new SourceDeviceName
-        {
-            Header =
-            {
-                Type = GetSourceNameType,
-                Size = (uint)sizeof(SourceDeviceName),
-                AdapterId = source.Adapter,
-                Id = source.SourceId,
-            },
-        };
-        if (DisplayConfigGetDeviceInfo(ref packet) != 0)
-        {
-            return "";
-        }
-        var name = new ReadOnlySpan<char>((char*)packet.ViewGdiDeviceName, 32);
-        var len = name.IndexOf('\0');
-        return new string(len >= 0 ? name[..len] : name);
-    }
-
     private static List<(Luid Adapter, uint SourceId)> GetActiveSources()
     {
         var result = new List<(Luid, uint)>();
         try
         {
-            // The path set can grow between the sizing call and the query (dock/
-            // undock is exactly when this code tends to run), so retry on
-            // ERROR_INSUFFICIENT_BUFFER — the documented pattern for this API.
-            int status;
-            uint numPaths;
-            PathInfo[] paths;
-            var attempts = 0;
-            do
+            var paths = QueryActivePaths("Display scale", out var numPaths);
+            if (paths is null)
             {
-                if (GetDisplayConfigBufferSizes(QdcOnlyActivePaths, out numPaths, out var numModes) != 0)
-                {
-                    return result;
-                }
-                paths = new PathInfo[numPaths];
-                var modes = new ModeInfo[numModes];
-                status = QueryDisplayConfig(QdcOnlyActivePaths, ref numPaths, paths, ref numModes, modes, 0);
-            } while (status == ErrorInsufficientBuffer && ++attempts < 5);
-            if (status != 0)
-            {
-                Log.Warn($"Display scale: QueryDisplayConfig failed with {status}.");
                 return result;
             }
             for (var i = 0; i < numPaths; i++)
@@ -535,5 +401,156 @@ public static partial class DisplayScale
             Log.Warn($"Display scale: enumeration failed: {ex.Message}");
         }
         return result;
+    }
+
+    // ---- HDR (DisplayConfig advanced color) ------------------------------------------------
+    // Queried and set on the path TARGET; the GDI source name only keys the profile lookup.
+
+    private readonly record struct HdrTarget(string DeviceName, Luid AdapterId, uint TargetId, bool Supported, bool Enabled);
+
+    /// <summary>Gets HDR availability and current state keyed by GDI source name.</summary>
+    internal static Dictionary<string, (bool Available, bool Enabled)> ReadActiveHdr()
+    {
+        var result = new Dictionary<string, (bool, bool)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var target in EnumerateHdrTargets())
+        {
+            result.TryAdd(target.DeviceName, (target.Supported, target.Enabled));
+        }
+        return result;
+    }
+
+    /// <summary>Applies the selected profile's HDR flag only to monitors that currently support HDR.</summary>
+    internal static void ApplyHdr(IEnumerable<MonitorDisplayProfile> profiles, bool game)
+    {
+        foreach (var target in EnumerateHdrTargets())
+        {
+            MonitorDisplayProfile? profile = null;
+            foreach (var candidate in profiles)
+            {
+                if (string.Equals(candidate.DeviceName, target.DeviceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    profile = candidate;
+                    break;
+                }
+            }
+            if (profile is null)
+            {
+                continue;
+            }
+            var enabled = game ? profile.Game.HdrEnabled : profile.Desktop.HdrEnabled;
+            if (!ShouldChange(target.Supported, target.Enabled, enabled))
+            {
+                continue;
+            }
+            var packet = new AdvancedColorState
+            {
+                Header =
+                {
+                    Type = SetAdvancedColorStateType,
+                    Size = (uint)sizeof(AdvancedColorState),
+                    AdapterId = target.AdapterId,
+                    Id = target.TargetId,
+                },
+                EnableAdvancedColor = enabled ? 1u : 0u,
+            };
+            var status = DisplayConfigSetDeviceInfo(ref packet);
+            if (status == 0)
+            {
+                Log.Info($"Display profile: {target.DeviceName} HDR -> {(enabled ? "on" : "off")}.");
+            }
+            else
+            {
+                Log.Warn($"Display profile: {target.DeviceName} HDR {(enabled ? "enable" : "disable")} failed ({status}).");
+            }
+        }
+    }
+
+    internal static bool ShouldChange(bool available, bool current, bool requested)
+        => available && current != requested;
+
+    private static List<HdrTarget> EnumerateHdrTargets()
+    {
+        var result = new List<HdrTarget>();
+        var paths = QueryActivePaths("Display HDR", out var numPaths);
+        if (paths is null)
+        {
+            return result;
+        }
+        for (var i = 0; i < numPaths; i++)
+        {
+            var path = paths[i];
+            var name = GetSourceDeviceName(path.SourceInfo.AdapterId, path.SourceInfo.Id);
+            if (name.Length == 0)
+            {
+                continue;
+            }
+            var info = new AdvancedColorInfo
+            {
+                Header =
+                {
+                    Type = GetAdvancedColorInfoType,
+                    Size = (uint)sizeof(AdvancedColorInfo),
+                    AdapterId = path.TargetInfo.AdapterId,
+                    Id = path.TargetInfo.Id,
+                },
+            };
+            if (DisplayConfigGetDeviceInfo(ref info) != 0)
+            {
+                continue;
+            }
+            result.Add(new HdrTarget(name, path.TargetInfo.AdapterId, path.TargetInfo.Id,
+                Supported: (info.Value & 1) != 0,
+                Enabled: (info.Value & 2) != 0));
+        }
+        return result;
+    }
+
+    // ---- shared DisplayConfig plumbing ------------------------------------------------------
+
+    private static PathInfo[]? QueryActivePaths(string context, out uint numPaths)
+    {
+        // The path set can grow between the sizing call and the query (dock/
+        // undock is exactly when this code tends to run), so retry on
+        // ERROR_INSUFFICIENT_BUFFER — the documented pattern for this API.
+        int status;
+        PathInfo[] paths;
+        var attempts = 0;
+        do
+        {
+            if (GetDisplayConfigBufferSizes(QdcOnlyActivePaths, out numPaths, out var numModes) != 0)
+            {
+                return null;
+            }
+            paths = new PathInfo[numPaths];
+            var modes = new ModeInfo[numModes];
+            status = QueryDisplayConfig(QdcOnlyActivePaths, ref numPaths, paths, ref numModes, modes, 0);
+        } while (status == ErrorInsufficientBuffer && ++attempts < 5);
+        if (status != 0)
+        {
+            Log.Warn($"{context}: QueryDisplayConfig failed with {status}.");
+            return null;
+        }
+        return paths;
+    }
+
+    private static string GetSourceDeviceName(Luid adapterId, uint sourceId)
+    {
+        var packet = new SourceDeviceName
+        {
+            Header =
+            {
+                Type = GetSourceNameType,
+                Size = (uint)sizeof(SourceDeviceName),
+                AdapterId = adapterId,
+                Id = sourceId,
+            },
+        };
+        if (DisplayConfigGetDeviceInfo(ref packet) != 0)
+        {
+            return "";
+        }
+        var name = new ReadOnlySpan<char>(packet.ViewGdiDeviceName, 32);
+        var len = name.IndexOf('\0');
+        return new string(len >= 0 ? name[..len] : name);
     }
 }

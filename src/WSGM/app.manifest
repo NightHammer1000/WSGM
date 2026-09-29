@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="0.2.1.0" name="WSGM.Shell"/>
+  <!-- Inert side-by-side identity: this application declares no dependent assemblies, so Windows
+       does not resolve anything through it. Deliberately NOT the product version — that lives in
+       WSGM.csproj and is maintainer-owned, and duplicating it here only creates a second place to
+       forget. The old value named a "WSGM.Shell" that stopped existing with the Winlogon shell
+       registration. -->
+  <assemblyIdentity version="1.0.0.0" name="WSGM"/>
 
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>

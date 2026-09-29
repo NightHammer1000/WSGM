@@ -10,15 +10,7 @@ namespace WSGM.Core;
 public static class ExplorerControl
 {
     /// <summary>Gets whether Explorer is running in the current interactive session.</summary>
-    public static bool IsRunningInSession()
-    {
-        var procs = ExplorerInSession();
-        foreach (var p in procs)
-        {
-            p.Dispose();
-        }
-        return procs.Count > 0;
-    }
+    public static bool IsRunningInSession() => WindowFinder.FindProcessIds("explorer").Count > 0;
 
     /// <summary>Starts Explorer for the current session when it is not already running.</summary>
     public static void StartExplorer() => StartExplorerCore(waitForElevationRepair: false);
@@ -80,7 +72,7 @@ public static class ExplorerControl
             var elevated = false;
             var undetermined = false;
             var seen = false;
-            foreach (var p in ExplorerInSession())
+            foreach (var pid in WindowFinder.FindProcessIds("explorer"))
             {
                 try
                 {
@@ -88,7 +80,7 @@ public static class ExplorerControl
                     // Three states, not two: IsProcessElevated returns null when
                     // Windows would not answer, and folding that into "unelevated"
                     // reports a repair that never happened.
-                    var state = ElevationCheck.IsProcessElevated((uint)p.Id);
+                    var state = ElevationCheck.IsProcessElevated(pid);
                     if (state == true)
                     {
                         elevated = true;
@@ -103,7 +95,6 @@ public static class ExplorerControl
                     undetermined = true;
                     Log.Warn($"Explorer elevation query failed: {ex.Message}");
                 }
-                finally { p.Dispose(); }
             }
 
             if (!seen)
@@ -140,27 +131,17 @@ public static class ExplorerControl
         }
     }
 
-    // Explorer's own Ctrl+Shift taskbar "Exit Explorer" command. This message is
-    // undocumented, so every use is bounded and fails open if the current Windows
-    // build does not honor it. Unlike Process.Kill, the orderly exit is not
-    // treated by Winlogon as a shell crash requiring AutoRestartShell recovery —
-    // kills got the shell respawned on device in both eras, and the Restart
-    // Manager's end-session shutdown wedged a freshly logged-on explorer (~30 s
-    // block, error 351) and got it respawned too. Do not bring either back.
+    // Explorer's own Ctrl+Shift taskbar "Exit Explorer" command — the ONLY exit
+    // mechanism Winlogon accepts without an AutoRestartShell respawn. Undocumented,
+    // so every use is bounded and fails open. The device evidence (kills and
+    // Restart Manager both device-DISPROVEN) lives in docs\boot-and-shell.md.
     private const uint ExitExplorerMessage = 0x05B4;
 
     private static readonly TimeSpan StableAbsence = TimeSpan.FromMilliseconds(500);
 
-    // After the orderly exit removes the taskbar, a shell extension can keep the
-    // ORIGINAL explorer process alive while it finishes shutting down. That
-    // graceful exit is what Winlogon accepts without AutoRestartShell; killing the
-    // remnant before it completes reads as a shell crash and gets it respawned
-    // (device-observed as "game mode needs two tries"). Wait this long for the
-    // remnant to leave on its own before terminating a genuinely stuck one — a
-    // clean run exited ~830 ms after the taskbar went, but 2 s was device-proven
-    // too short (2026-08-09: remnants past 2 s whose termination got the shell
-    // respawned and the takeover cancelled). Waiting is cheap; the kill is what
-    // costs the transition.
+    // How long a snapshotted remnant may outlive the destroyed taskbar before it
+    // is terminated. Never shortened to fit the remaining budget; the derivation
+    // and device evidence live in docs\boot-and-shell.md.
     private static readonly TimeSpan LingerGrace = TimeSpan.FromMilliseconds(8000);
 
     // How long the respawn-retry waits for the replacement explorer to put up
@@ -192,24 +173,16 @@ public static class ExplorerControl
     {
         lock (ExitGate)
         {
-            // ONE deadline for the whole operation, retry included. Giving the
-            // second attempt a fresh full budget (plus the taskbar wait) let a
-            // caller asking for 15 s sit in the transition for more than twice
-            // that, with the splash or the overlay waiting on it.
+            // ONE deadline for the whole operation, retry included (a fresh full
+            // budget for the retry more than doubled the caller's wait).
             var deadline = DateTime.UtcNow + timeout;
             if (ExitExplorerAndWaitCore(timeout))
             {
                 return true;
             }
-            // A Winlogon respawn is the one failure that is reliably
-            // recoverable: the replacement is a freshly started explorer that
-            // honors the next orderly exit within seconds (device-observed —
-            // every manual retry after a respawn succeeded). One bounded retry,
-            // and a second respawn ends the attempt for good (fighting
-            // AutoRestartShell loops). A replacement is never killed during the
-            // attempt that produced it; on the retry it becomes the shell being
-            // asked to exit, so only a remnant that acknowledged that exit and
-            // then outlived the grace is terminated.
+            // A Winlogon respawn is the one failure a single retry reliably
+            // recovers; a second respawn ends the attempt for good, and a
+            // replacement is never killed (see docs\boot-and-shell.md).
             if (!_respawnCancelled)
             {
                 return false;
@@ -237,14 +210,10 @@ public static class ExplorerControl
         }
     }
 
-    /// <summary>Waits until the taskbar belongs to the REPLACEMENT explorer,
-    /// plus a short settle.
-    ///
-    /// The owning pid is what makes this safe: the original shell can still own
-    /// a dying <c>Shell_TrayWnd</c> when Winlogon has already started its
-    /// replacement, and accepting any current-session taskbar posted the second
-    /// exit request into the process that was already leaving — so nothing
-    /// happened, and the retry timed out instead of entering game mode.</summary>
+    /// <summary>Waits until the taskbar belongs to the REPLACEMENT explorer, plus a
+    /// short settle. The owning-pid check is what makes this safe: the original
+    /// shell can still own a dying <c>Shell_TrayWnd</c>, and posting the retry into
+    /// the process that was already leaving did nothing.</summary>
     /// <param name="replacementProcessId">The pid Winlogon started.</param>
     /// <param name="timeout">How long to wait for its taskbar.</param>
     private static bool WaitForReplacementTaskbar(uint replacementProcessId, TimeSpan timeout)
@@ -447,7 +416,7 @@ public static class ExplorerControl
             try
             {
                 using var process = Process.GetProcessById(processId);
-                if (process.SessionId != CurrentSessionId ||
+                if (process.SessionId != WindowFinder.CurrentSessionId ||
                     !process.ProcessName.Equals("explorer", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
@@ -466,13 +435,14 @@ public static class ExplorerControl
         }
     }
 
+    /// <summary>Explorer pids of the CURRENT session only (other RDP/FUS sessions
+    /// run their own).</summary>
     private static List<int> ExplorerProcessIdsInSession()
     {
         var ids = new List<int>();
-        foreach (var p in ExplorerInSession())
+        foreach (var pid in WindowFinder.FindProcessIds("explorer"))
         {
-            ids.Add(p.Id);
-            p.Dispose();
+            ids.Add(checked((int)pid));
         }
         return ids;
     }
@@ -516,7 +486,7 @@ public static class ExplorerControl
         try
         {
             using var process = Process.GetProcessById(checked((int)processId));
-            return process.SessionId == CurrentSessionId;
+            return process.SessionId == WindowFinder.CurrentSessionId;
         }
         catch
         {
@@ -532,29 +502,35 @@ public static class ExplorerControl
     private static void KillElevatedExplorerAndWait()
     {
         var killed = new List<Process>();
-        foreach (var p in ExplorerInSession())
+        foreach (var pid in WindowFinder.FindProcessIds("explorer"))
         {
             var isElevated = false;
             try
             {
-                isElevated = ElevationCheck.IsProcessElevated((uint)p.Id) == true;
+                isElevated = ElevationCheck.IsProcessElevated(pid) == true;
             }
             catch { }
             if (!isElevated)
             {
-                p.Dispose();
                 continue;
             }
+            Process? p = null;
             try
             {
-                Log.Info($"Killing ELEVATED explorer.exe (pid {p.Id})");
+                p = Process.GetProcessById(checked((int)pid));
+                Log.Info($"Killing ELEVATED explorer.exe (pid {pid})");
                 p.Kill();
                 killed.Add(p);
             }
+            catch (ArgumentException)
+            {
+                // Exited between enumeration and open.
+                p?.Dispose();
+            }
             catch (Exception ex)
             {
-                Log.Warn($"Could not kill explorer pid {p.Id}: {ex.Message}");
-                p.Dispose();
+                Log.Warn($"Could not kill explorer pid {pid}: {ex.Message}");
+                p?.Dispose();
             }
         }
         foreach (var p in killed)
@@ -571,42 +547,8 @@ public static class ExplorerControl
         }
     }
 
-    private static string ExplorerPath => Path.Combine(
+    /// <summary>The canonical Windows Explorer image path, shared by every launcher
+    /// and image-identity check.</summary>
+    internal static string ExplorerPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
-
-    // A process cannot change sessions, and this is asked for on every 10 Hz
-    // takeover poll and on every overlay/edge-swipe IsRunningInSession() call —
-    // query it once instead of leaking an undisposed Process each time.
-    private static readonly int CurrentSessionId = ReadCurrentSessionId();
-
-    private static int ReadCurrentSessionId()
-    {
-        using var self = Process.GetCurrentProcess();
-        return self.SessionId;
-    }
-
-    /// <summary>Explorer processes of the CURRENT session only (other RDP/FUS
-    /// sessions run their own). Caller disposes every returned process.</summary>
-    private static List<Process> ExplorerInSession()
-    {
-        var result = new List<Process>();
-        foreach (var p in Process.GetProcessesByName("explorer"))
-        {
-            var keep = false;
-            try
-            {
-                keep = p.SessionId == CurrentSessionId;
-            }
-            catch { /* process may have exited */ }
-            if (keep)
-            {
-                result.Add(p);
-            }
-            else
-            {
-                p.Dispose();
-            }
-        }
-        return result;
-    }
 }

@@ -16,12 +16,12 @@ namespace WSGM.Core;
 /// SMTO_ABORTIFHUNG so a wedged app cannot stall the bar), the window class icon
 /// (GCLP_HICON/GCLP_HICONSM), WM_QUERYDRAGICON, and finally the first icon resource
 /// of the owning process's executable (ExtractIconExW — deliberately not
-/// SHGetFileInfo, which requires COM init and is off-limits under NativeAOT).
+/// SHGetFileInfo, so icon lookup does not depend on shell icon-cache or COM initialization).
 ///
 /// HICONs obtained from another window are foreign, still-owned USER handles:
 /// they are CopyIcon'd before rendering and only the copy is destroyed —
 /// destroying the original would yank it out from under the owning app.</summary>
-public sealed class WindowIconCache : IDisposable
+public sealed class WindowIconCache
 {
     private readonly Dictionary<nint, Bitmap?> _byWindow = [];
     private readonly HashSet<nint> _inFlight = [];
@@ -114,9 +114,6 @@ public sealed class WindowIconCache : IDisposable
         }
     }
 
-    /// <summary>Clears the cache.</summary>
-    public void Dispose() => Clear();
-
     private Bitmap? Resolve(nint hwnd, uint processId)
     {
         // Foreign handles: render a private copy, never destroy the original.
@@ -145,7 +142,7 @@ public sealed class WindowIconCache : IDisposable
         }
 
         // Last resort: the exe's own first icon resource. These handles are ours.
-        var exe = GetProcessImagePath(processId);
+        var exe = NativeShellProcess.TryGetImagePath(processId);
         if (exe is null)
         {
             return null;
@@ -206,26 +203,6 @@ public sealed class WindowIconCache : IDisposable
         return 0;
     }
 
-    private static string? GetProcessImagePath(uint pid)
-    {
-        var process = NativeMethods.OpenProcess(NativeMethods.ProcessQueryLimitedInformation, false, pid);
-        if (process == 0)
-        {
-            return null;
-        }
-        try
-        {
-            var buffer = new char[1024];
-            var length = (uint)buffer.Length;
-            return NativeMethods.QueryFullProcessImageNameW(process, 0, buffer, ref length)
-                ? new string(buffer, 0, (int)length)
-                : null;
-        }
-        finally
-        {
-            NativeMethods.CloseHandle(process);
-        }
-    }
 
     private Bitmap? Render(nint hIcon) => IconRasterizer.Rasterize(hIcon, _pixelSize);
 }

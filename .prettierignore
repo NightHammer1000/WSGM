@@ -1,5 +1,9 @@
 # C# is formatted by dotnet format; generated and binary output is never formatted.
 AGENTS.md
+# Every CLAUDE.md is a symlink to the AGENTS.md beside it. Prettier resolves the
+# link and sees a separate path, so excluding only AGENTS.md leaves all of them
+# failing format:check against content that is deliberately not Prettier-formatted.
+CLAUDE.md
 
 # Agent worktrees checked out under .claude/ carry their own repo copy; formatting
 # them from the outer checkout dirties another agent's working tree.
@@ -16,11 +20,26 @@ TestResults/
 # would make the next build fail the check against its own fresh copy.
 src/WSGM/Native/SteamInputLease/
 
-# The vendored Rust libraries keep their own formatting and their own gates
-# (clippy, rustdoc); reformatting their docs here would only create churn.
+# These are ordered lexical fragments, not standalone TypeScript programs. The Steam asset builder
+# concatenates and type-checks them, then runs the pinned Prettier over the emitted single asset.
+src/WSGM/Core/SteamUiAssets/Source/**/*.ts
+
+# Submodules own their own formatting and their own gates. They are separate
+# repositories; formatting them from here would both create churn and dirty a
+# working tree this repo only pins — and the reformatted files could never be
+# committed from here anyway.
 native/SteamInput/
-native/Radio/
+external/
 
 # Vendored upstream source. Reformatting it would destroy the diff against
 # upstream, which is the whole point of keeping it re-syncable.
 third_party/
+
+# Deliberately malformed fixtures. Prettier cannot parse what these exist to test,
+# and repairing them would delete the case.
+tests/**/Fixtures/malformed.json
+
+# WSGM 2.0 design documents. Working documents under active hand-editing, never
+# Prettier-formatted; a rewrap would bury content edits under mechanical churn.
+# The decision record is written Prettier-clean and can be checked explicitly.
+_plan/

@@ -25,9 +25,22 @@ public sealed class KeyRecorder : IDisposable
     private static KeyRecorder? _active;
     private nint _hook;
 
-    /// <summary>Fires with (modifier flags for RegisterHotKey, virtual key code).
-    /// Escape cancels and reports (0, 0).</summary>
-    public event Action<uint, int>? Recorded;
+    /// <summary>Fires with the captured shortcut. Escape cancels and reports
+    /// <see cref="Cleared"/>.</summary>
+    public event Action<HotkeyConfig>? Recorded;
+
+    /// <summary>A cleared shortcut: disabled, no modifiers, no key.</summary>
+    /// <remarks>Every field is set explicitly because <see cref="HotkeyConfig"/>'s
+    /// defaults describe the shipped Ctrl+Alt+Home shortcut, not an empty one.</remarks>
+    public static HotkeyConfig Cleared() => new()
+    {
+        Enabled = false,
+        Ctrl = false,
+        Alt = false,
+        Shift = false,
+        Win = false,
+        VirtualKey = 0,
+    };
 
     /// <summary>Installs the low-level keyboard hook and begins capturing one shortcut.</summary>
     public void Start()
@@ -53,7 +66,7 @@ public sealed class KeyRecorder : IDisposable
             var error = Marshal.GetLastWin32Error();
             Stop();     // clear _active so the failed recorder isn't statically rooted
             Log.Warn($"Could not install keyboard hook for recording (Win32 error {error}).");
-            Recorded?.Invoke(0, 0);
+            Recorded?.Invoke(Cleared());
         }
     }
 
@@ -99,34 +112,26 @@ public sealed class KeyRecorder : IDisposable
             return NativeMethods.CallNextHookEx(0, nCode, wParam, lParam);
         }
 
-        uint modifiers = 0;
-        if (IsDown(VkControl))
-        {
-            modifiers |= NativeMethods.ModControl;
-        }
-
-        if (IsDown(VkMenu))
-        {
-            modifiers |= NativeMethods.ModAlt;
-        }
-
-        if (IsDown(VkShift))
-        {
-            modifiers |= NativeMethods.ModShift;
-        }
-
-        if (IsDown(VkLWin) || IsDown(VkRWin))
-        {
-            modifiers |= NativeMethods.ModWin;
-        }
-
+        // Captured directly as the stored configuration shape, so the recorded
+        // shortcut is never round-tripped through RegisterHotKey's flag encoding.
         var cancelled = vk == VkEscape;
+        HotkeyConfig hotkey = cancelled
+            ? Cleared()
+            : new HotkeyConfig
+            {
+                Enabled = true,
+                Ctrl = IsDown(VkControl),
+                Alt = IsDown(VkMenu),
+                Shift = IsDown(VkShift),
+                Win = IsDown(VkLWin) || IsDown(VkRWin),
+                VirtualKey = vk,
+            };
+
         // Unhook synchronously (LL hooks run on the installing thread, so this is
         // safe here): with the unhook deferred to the posted callback, a second
         // keydown arriving first would fire Recorded again.
         recorder.Stop();
-        Dispatcher.UIThread.Post(
-            () => recorder.Recorded?.Invoke(cancelled ? 0u : modifiers, cancelled ? 0 : vk));
+        Dispatcher.UIThread.Post(() => recorder.Recorded?.Invoke(hotkey));
 
         // Swallow the key so recording doesn't type into the UI behind it.
         return 1;

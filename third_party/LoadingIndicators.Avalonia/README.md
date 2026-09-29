@@ -1,4 +1,9 @@
 # LoadingIndicators.Avalonia
+
+> WSGM vendors these sources directly into its application assembly. The usage
+> example below therefore uses WSGM's resource URI rather than a separate
+> `LoadingIndicators.Avalonia.dll`.
+
 [![Nuget](https://img.shields.io/nuget/v/LoadingIndicators.Avalonia)](https://www.nuget.org/packages/LoadingIndicators.Avalonia)
 
 ![Demo](https://raw.githubusercontent.com/moviegear/LoadingIndicators.Avalonia/master/.github/demo.gif)
@@ -30,7 +35,7 @@ LoadingIndicators.Avalonia is an adaptation for Avalonia of the [LoadingIndicato
 <Application.Resources>
     <ResourceDictionary>
         <ResourceDictionary.MergedDictionaries>
-            <ResourceInclude Source="avares://LoadingIndicators.Avalonia/LoadingIndicators.axaml" />
+            <ResourceInclude Source="avares://WSGM/ThirdParty/LoadingIndicators/LoadingIndicators.axaml" />
         </ResourceDictionary.MergedDictionaries>
     </ResourceDictionary>
 </Application.Resources>

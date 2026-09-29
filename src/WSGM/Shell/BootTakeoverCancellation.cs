@@ -27,6 +27,19 @@ internal sealed class BootTakeoverCancellation : IDisposable
         }
     }
 
+    /// <summary>Whether application teardown cancelled this takeover without requesting a new
+    /// desktop transition from the splash.</summary>
+    internal bool ShutdownRequested
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _state == BootTakeoverState.ShutdownRequested;
+            }
+        }
+    }
+
     /// <summary>Requests cancellation of the active takeover.</summary>
     /// <returns>True when this coordinator accepted the request; false when the
     /// takeover had already completed and the ordinary desktop transition owns it.</returns>
@@ -39,6 +52,23 @@ internal sealed class BootTakeoverCancellation : IDisposable
                 return false;
             }
             _state = BootTakeoverState.DesktopRequested;
+            _source.Cancel();
+            return true;
+        }
+    }
+
+    /// <summary>Cancels an active takeover for application teardown. Unlike a splash request, this
+    /// never starts another session transition; the shutdown owner decides whether recovery is
+    /// needed after every in-flight transition has settled.</summary>
+    internal bool RequestShutdown()
+    {
+        lock (_gate)
+        {
+            if (_state is BootTakeoverState.Completed or BootTakeoverState.ShutdownRequested)
+            {
+                return false;
+            }
+            _state = BootTakeoverState.ShutdownRequested;
             _source.Cancel();
             return true;
         }
@@ -57,12 +87,20 @@ internal sealed class BootTakeoverCancellation : IDisposable
     }
 
     /// <inheritdoc />
-    public void Dispose() => _source.Dispose();
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            _state = BootTakeoverState.Completed;
+            _source.Dispose();
+        }
+    }
 
     private enum BootTakeoverState
     {
         Active,
         DesktopRequested,
+        ShutdownRequested,
         Completed,
     }
 }

@@ -1,0 +1,84 @@
+diff --git a/clib/main.go b/clib/main.go
+index 0725e60..a1952b8 100644
+--- a/clib/main.go
++++ b/clib/main.go
+@@ -195,6 +195,7 @@ var hiddenDeviceTypes = map[string]bool{
+ type feedbackReg struct {
+ 	fn       C.viiper_feedback_fn
+ 	userData unsafe.Pointer
++	inflight sync.WaitGroup
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -646,9 +647,9 @@ func viiper_device_attach(busID C.uint32_t, deviceID C.uint32_t) C.int {
+ //export viiper_device_remove
+ func viiper_device_remove(busID C.uint32_t, deviceID C.uint32_t) C.int {
+ 	mu.Lock()
+-	defer mu.Unlock()
+ 
+ 	if server == nil {
++		mu.Unlock()
+ 		return setError(fmt.Errorf("not initialized"))
+ 	}
+ 
+@@ -657,13 +658,40 @@ func viiper_device_remove(busID C.uint32_t, deviceID C.uint32_t) C.int {
+ 
+ 	key := deviceKey{busID: bid, devID: did}
+ 	info := devices[key]
+-	if info != nil && info.port > 0 {
+-		if err := api.DetachLocalhostClient(context.Background(), info.port, slog.Default()); err != nil {
+-			slog.Warn("detach device failed; removing server-side device anyway", "busID", bid, "deviceID", did, "port", info.port, "error", err)
++	if info == nil {
++		mu.Unlock()
++		return setError(fmt.Errorf("device %d-%d not found", bid, did))
++	}
++
++	// Stop reverse calls before unplugging the client. usbip-win2 can deliver one
++	// last output packet while plugout is in progress; its device callback must not
++	// re-enter a caller that is synchronously waiting for this removal to return.
++	feedback := feedbackCallbacks[key]
++	delete(feedbackCallbacks, key)
++	port := info.port
++	mu.Unlock()
++	if feedback != nil {
++		feedback.inflight.Wait()
++	}
++
++	// Do not hold the C API mutex across a driver operation. Besides taking an
++	// unbounded amount of time, plugout cancels endpoint workers whose output path
++	// briefly takes the same mutex to observe that feedback has been quiesced.
++	if port > 0 {
++		if err := api.DetachLocalhostClient(context.Background(), port, slog.Default()); err != nil {
++			slog.Warn("detach device failed; removing server-side device anyway", "busID", bid, "deviceID", did, "port", port, "error", err)
+ 		}
+ 	}
++
++	mu.Lock()
++	defer mu.Unlock()
++	if server == nil {
++		return setError(fmt.Errorf("not initialized after client detach"))
++	}
++	if current := devices[key]; current != info {
++		return setError(fmt.Errorf("device %d-%d changed during client detach", bid, did))
++	}
+ 	delete(devices, key)
+-	delete(feedbackCallbacks, key)
+ 
+ 	didStr := fmt.Sprintf("%d", did)
+ 	if err := server.RemoveDeviceByID(bid, didStr); err != nil {
+@@ -1036,11 +1064,13 @@ func invokeFeedbackCallback(busID, deviceID uint32, data []byte) {
+ 	mu.Lock()
+ 	key := deviceKey{busID: busID, devID: deviceID}
+ 	reg, ok := feedbackCallbacks[key]
+-	mu.Unlock()
+-
+ 	if !ok || reg.fn == nil {
++		mu.Unlock()
+ 		return
+ 	}
++	reg.inflight.Add(1)
++	mu.Unlock()
++	defer reg.inflight.Done()
+ 
+ 	cData := C.CBytes(data)
+ 	defer C.free(cData)

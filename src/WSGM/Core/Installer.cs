@@ -1,162 +1,35 @@
 using System;
-using System.Diagnostics;
 using System.IO;
-using Microsoft.Win32;
 
 namespace WSGM.Core;
 
-/// <summary>Self-installer: WSGM.exe is its own setup. Everything is per-user —
-/// no elevation, no MSI/MSIX. Installs to %LOCALAPPDATA%\WSGM\bin, adds a Start
-/// Menu shortcut and an entry in Settings → Apps; uninstall reverses all of it
-/// (including the shell registration, if active).</summary>
+/// <summary>Install-lifecycle helpers behind the Inno installer: the per-user install
+/// directory layout and the machine-setting rollback the uninstaller drives through
+/// <c>--uninstall-restore</c>.</summary>
 public static class Installer
 {
-    private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\WSGM";
-
     /// <summary>Gets the stable per-user directory that holds the installed application files.</summary>
     public static string InstallDir => Path.Combine(Log.Directory, "bin");
 
     /// <summary>Gets the installed WSGM executable path.</summary>
     public static string InstalledExePath => Path.Combine(InstallDir, "WSGM.exe");
 
-    /// <summary>Gets the installed Steam launch wrapper path.</summary>
-    public static string InstalledLaunchWrapperExePath =>
-        Path.Combine(InstallDir, LaunchWrapperCommand.HelperFileName);
-
-    private static string ShortcutPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "WSGM.lnk");
-
     /// <summary>Prepares the install directory for the files Inno just laid down.
     /// Returns the installed exe path.</summary>
-    /// <remarks>
-    /// WSGM no longer installs itself. Inno is the only installer, so this keeps only
-    /// the housekeeping that still applies after its files are in place: making sure
-    /// the directory exists, and clearing update-swap leftovers.
-    /// </remarks>
     public static string InstallApp()
     {
         Directory.CreateDirectory(InstallDir);
-
-        // Clean up leftovers from a previous update-while-running swap
-        // (both the fixed .old name and the unique .old-<n> fallbacks).
-        foreach (var old in Directory.GetFiles(InstallDir, "*.old*"))
-        {
-            try { File.Delete(old); } catch { }
-        }
-
         Log.Info($"Installed to {InstalledExePath}");
         return InstalledExePath;
     }
 
-    /// <summary>Renames a loaded target file out of the way. The fixed .old name can
-    /// itself still be mapped by an even older instance (two updates while the
-    /// original process keeps running), so fall back to a unique .old-&lt;n&gt; name
-    /// instead of letting the move throw out of InstallApp.</summary>
-    private static void MoveAsideLockedTarget(string target)
-    {
-        try
-        {
-            File.Move(target, target + ".old", overwrite: true);
-            return;
-        }
-        catch (IOException)
-        {
-            // .old is locked too — pick a fresh name below.
-        }
-        for (var n = 1; ; n++)
-        {
-            var aside = $"{target}.old-{n}";
-            if (File.Exists(aside))
-            {
-                continue;
-            }
-            File.Move(target, aside);
-            Log.Info($"Locked .old target, swapped aside as {Path.GetFileName(aside)}");
-            return;
-        }
-    }
-
-    /// <summary>Removes shell registration (if ours), shortcut, uninstall entry, and
-    /// finally the whole %LOCALAPPDATA%\WSGM directory via a detached delayed
-    /// delete (an exe cannot delete itself while running).</summary>
-    public static void UninstallApp()
-    {
-        // The pipe-backed lease falls away when a process ends. Release an active
-        // lease from this process before uninstalling its native gate files.
-        SteamInputBlocker.ReleaseBestEffort("uninstall-app");
-        LaunchWrapperCommand.StopRunningHelpers("uninstall");
-
-        ShellRegistration.Uninstall();
-
-        // Deliberately DO NOT remove Steam's .cef-enable-remote-debugging flag here:
-        // it is shared Steam-wide state that CSSLoader-Desktop, Millennium and other
-        // CEF tools also set and depend on. WSGM only ever wrote it if absent and
-        // cannot tell whether it or another tool created it, so deleting it on
-        // uninstall would silently break a coexisting tool. The flag enables a
-        // loopback-only port; leaving it is the lesser evil.
-
-        // Roll back machine/user settings BEFORE the config directory (and the
-        // snapshots inside config.json) are scheduled for deletion.
-        RestoreMachineSettings();
-
-        // Both are best-effort — a leftover shortcut or Apps entry must not stop the
-        // uninstall — but they stay visible to the user, so record why they survived.
-        try { File.Delete(ShortcutPath); }
-        catch (Exception ex) { Log.Warn($"Uninstall: could not remove the Start Menu shortcut: {ex.Message}"); }
-        try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false); }
-        catch (Exception ex) { Log.Warn($"Uninstall: could not remove the Apps uninstall entry: {ex.Message}"); }
-
-        Log.Info("Uninstalling — scheduling directory removal.");
-        try
-        {
-            Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"),
-                $"/c timeout /t 3 /nobreak >nul & rmdir /s /q \"{Log.Directory}\"")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                // cmd must not inherit a CWD inside the tree being deleted —
-                // rmdir cannot remove a directory that is some process's CWD.
-                WorkingDirectory = Path.GetTempPath(),
-            });
-        }
-        catch (Exception ex)
-        {
-            Log.Error("Failed to schedule directory removal", ex);
-        }
-    }
-
     /// <summary>Best-effort rollback of every machine/user setting WSGM changed
-    /// outside its own directory: display scaling, UAC prompt level, lock-on-wake,
-    /// and posture values left by older builds. Called by UninstallApp and by --uninstall-restore;
-    /// each step is isolated so one failure cannot stop the rest. The UAC and
-    /// lock-on-wake writes need elevation (HKLM) — when this runs unelevated and
-    /// either snapshot needs restoring, the whole restore is handed to one
-    /// elevated --uninstall-restore instance (a single UAC prompt); declining
-    /// leaves those two settings as-is and everything else still runs.</summary>
+    /// outside its own directory: display scaling, UAC prompt level, and
+    /// lock-on-wake. Called by --uninstall-restore, which the elevated Inno
+    /// uninstaller runs (PrivilegesRequired=admin) so the HKLM writes succeed
+    /// directly; each step is isolated so one failure cannot stop the rest.</summary>
     public static void RestoreMachineSettings()
     {
-        // The Inno uninstaller runs --uninstall-restore unelevated
-        // (PrivilegesRequired=lowest): without this hand-off the HKLM writes
-        // below always fail silently and uninstall would leave UAC prompts
-        // disabled and lock-on-wake off. Route only when provably unelevated —
-        // null (unknown) must not spawn a child that could loop forever.
-        try
-        {
-            if (ElevationCheck.IsCurrentProcessElevated() == false && NeedsElevatedRestore())
-            {
-                if (SelfElevation.RunElevatedAction("--uninstall-restore", "Uninstall restore"))
-                {
-                    // The elevated instance ran this whole method with full rights.
-                    return;
-                }
-                Log.Warn("Uninstall restore: elevation declined — UAC/lock-on-wake settings left as-is.");
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"Uninstall restore: elevated hand-off failed: {ex.Message}");
-        }
-
         try
         {
             var config = ConfigStore.Load();
@@ -194,85 +67,5 @@ public static class Installer
         {
             Log.Warn($"Uninstall restore: lock-on-wake failed: {ex.Message}");
         }
-
-        try
-        {
-            LegacyPostureCleanup.Restore();
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"Uninstall restore: legacy posture cleanup failed: {ex.Message}");
-        }
-    }
-
-    /// <summary>True when a snapshot exists whose restore needs an HKLM write —
-    /// the same conditions the restore steps themselves check.</summary>
-    private static bool NeedsElevatedRestore()
-    {
-        try
-        {
-            var config = ConfigStore.Load();
-            return (config.PreviousUacSnapshotCaptured && UacSettings.Read().PromptsDisabled)
-                || (config.PreviousLockOnWakeSnapshotCaptured && LockScreenSettings.SignInOnWakeDisabled());
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static void CreateShortcut()
-    {
-        // .lnk creation needs IShellLink (COM). Spawning Windows PowerShell for this
-        // one-shot task avoids in-process COM interop under NativeAOT.
-        // '' doubling: an apostrophe in the profile path (O'Brien) must not break
-        // the single-quoted PS literals.
-        var shortcut = ShortcutPath.Replace("'", "''");
-        var exe = InstalledExePath.Replace("'", "''");
-        var dir = InstallDir.Replace("'", "''");
-        var script =
-            "$ws = New-Object -ComObject WScript.Shell; " +
-            $"$s = $ws.CreateShortcut('{shortcut}'); " +
-            $"$s.TargetPath = '{exe}'; " +
-            $"$s.WorkingDirectory = '{dir}'; " +
-            "$s.Description = 'WSGM settings'; " +
-            "$s.Save()";
-        var powershell = Path.Combine(
-            Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
-        if (!ConsoleTool.Run(powershell, $"-NoProfile -NonInteractive -Command \"{script}\""))
-        {
-            Log.Warn("Could not create Start Menu shortcut.");
-        }
-    }
-
-    private static void RegisterUninstallEntry()
-    {
-        using var key = Registry.CurrentUser.CreateSubKey(UninstallKey);
-        var version = typeof(Installer).Assembly.GetName().Version?.ToString(3) ?? "0.1.0";
-        key.SetValue("DisplayName", "WSGM");
-        key.SetValue("DisplayVersion", version);
-        key.SetValue("Publisher", "WSGM");
-        key.SetValue("DisplayIcon", InstalledExePath);
-        key.SetValue("InstallLocation", InstallDir);
-        key.SetValue("UninstallString", $"\"{InstalledExePath}\" --uninstall-app");
-        key.SetValue("QuietUninstallString", $"\"{InstalledExePath}\" --uninstall-app");
-        key.SetValue("NoModify", 1, RegistryValueKind.DWord);
-        key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-        try
-        {
-            // The NativeAOT payload is mostly native sibling DLLs — count them too.
-            long bytes = 0;
-            foreach (var file in Directory.GetFiles(InstallDir))
-            {
-                var ext = Path.GetExtension(file);
-                if (ext.Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
-                    ext.Equals(".dll", StringComparison.OrdinalIgnoreCase))
-                {
-                    bytes += new FileInfo(file).Length;
-                }
-            }
-            key.SetValue("EstimatedSize", (int)(bytes / 1024), RegistryValueKind.DWord);
-        }
-        catch { }
     }
 }

@@ -5,11 +5,20 @@ using Avalonia.Threading;
 namespace WSGM.Input;
 
 /// <summary>The union/hold-timer chord state machine shared by the recorder and the
-/// watcher (see ChordTiming for the model). State is tracked per physical pad: a
-/// chord must complete on ONE controller — buttons held on another pad neither join
-/// the union nor block the full-release detection.</summary>
+/// watcher, modelled on Handheld Companion's InputsManager: buttons accumulate into
+/// a union that only clears on full release (so a combo does not need frame-perfect
+/// presses), and a hold timer restarted on every state change promotes the chord to
+/// "hold". State is tracked per physical pad: a chord must complete on ONE
+/// controller — buttons held on another pad neither join the union nor block the
+/// full-release detection.</summary>
 internal sealed class ChordTracker : IDisposable
 {
+    /// <summary>Time with no state change before a held chord counts as a hold.</summary>
+    public static readonly TimeSpan Hold = TimeSpan.FromMilliseconds(600);
+
+    /// <summary>Time with no input at all before recording gives up.</summary>
+    public static readonly TimeSpan RecordingExpiry = TimeSpan.FromSeconds(3);
+
     /// <summary>One pad's chord episode. Union accumulates until full release.</summary>
     internal sealed class Pad
     {
@@ -17,7 +26,7 @@ internal sealed class ChordTracker : IDisposable
         /// <summary>Set by a consumer that acted on HoldElapsed so it does not act
         /// again (further state changes restart the hold timer) until full release.</summary>
         public bool HoldConsumed;
-        public readonly DispatcherTimer HoldTimer = new() { Interval = ChordTiming.Hold };
+        public readonly DispatcherTimer HoldTimer = new() { Interval = Hold };
     }
 
     private readonly Dictionary<uint, Pad> _pads = new();

@@ -1,50 +1,7 @@
 using System.ComponentModel;
+using WifiSecurity = WindowsDeviceControl.WindowsRadio.WifiSecurity;
 
 namespace WSGM.Shell;
-
-/// <summary>How a Wi-Fi network protects itself, mirroring the helper's codes.</summary>
-public enum WifiSecurity
-{
-    /// <summary>No authentication; joining needs no password.</summary>
-    Open = 0,
-
-    /// <summary>A pre-shared key. Joining asks for a password.</summary>
-    Personal = 1,
-
-    /// <summary>802.1X. Not supported here — it needs an EAP configuration and a
-    /// credential flow a game-mode panel has no business guessing at.</summary>
-    Enterprise = 2,
-
-    /// <summary>OWE ("Enhanced Open"): joined without a password like an open
-    /// network, but encrypted. Its own value because the profile Windows needs
-    /// differs from a legacy open network's.</summary>
-    EnhancedOpen = 3,
-
-    /// <summary>A protection this panel cannot join — WEP. Listed, but not
-    /// offered: its open-system authentication otherwise looks exactly like an
-    /// unsecured network, so it would skip the password prompt and then fail.
-    /// </summary>
-    Unsupported = 4,
-}
-
-/// <summary>The power state of a radio.</summary>
-public enum RadioPower
-{
-    /// <summary>The radio is on.</summary>
-    On = 0,
-
-    /// <summary>The radio is off but switchable.</summary>
-    Off = 1,
-
-    /// <summary>Disabled by policy or a hardware switch; not switchable.</summary>
-    Disabled = 2,
-
-    /// <summary>State could not be read.</summary>
-    Unknown = 3,
-
-    /// <summary>No radio of this kind exists on this machine.</summary>
-    Absent = 4,
-}
 
 /// <summary>One row in the Wi-Fi list. A row instance survives refreshes so the
 /// gamepad cursor keeps its place; only its values are updated.</summary>
@@ -128,7 +85,10 @@ public sealed class WifiNetworkEntry : INotifyPropertyChanged
     /// network can always be disconnected, whatever the scan says about
     /// joining it again — but an enterprise network is never joinable here (it
     /// needs an EAP flow this panel does not offer), and an enabled button that
-    /// silently does nothing is worse than a disabled one.</summary>
+    /// silently does nothing is worse than a disabled one. WEP
+    /// (<see cref="WifiSecurity.Unsupported"/>) is listed but not offered: its
+    /// open-system authentication otherwise looks exactly like an unsecured
+    /// network, so it would skip the password prompt and then fail.</summary>
     public bool ActionEnabled => Connected
         || (Connectable
             && Security != WifiSecurity.Enterprise
@@ -156,7 +116,7 @@ public sealed class WifiNetworkEntry : INotifyPropertyChanged
     /// <summary>Gets whether joining this network needs a password prompt: it is
     /// secured, and no saved profile already carries the key. Enhanced Open is
     /// encrypted but keyless, so it never prompts.</summary>
-    public bool NeedsPassword => Security == WifiSecurity.Personal && !Saved;
+    public bool NeedsPassword => Security == WifiSecurity.PersonalPsk && !Saved;
 
     /// <summary>Gets whether the network is protected at all.</summary>
     public bool Secured => Security != WifiSecurity.Open;
@@ -190,9 +150,6 @@ public sealed class WifiNetworkEntry : INotifyPropertyChanged
             WifiSecurity.EnhancedOpen => Saved ? "Open (encrypted), saved" : "Open (encrypted)",
             _ => Saved ? "Saved" : "Secured",
         };
-
-    /// <summary>Gets whether the second line has anything to say.</summary>
-    public bool HasStatusLine => StatusLine.Length > 0;
 
     /// <summary>Gets the label for this row's action button.</summary>
     public string ActionText => Connected ? "Disconnect" : "Connect";
@@ -328,7 +285,7 @@ public sealed class BluetoothDeviceEntry : INotifyPropertyChanged
     /// <summary>Gets whether this device can be connected/disconnected on
     /// demand — true only for devices with audio endpoints. Everything else
     /// (mice, gamepads) reconnects on its own initiative when used, and
-    /// Windows offers no host-side connect for them; the row then shows only
+    /// Windows offers no general reconnect operation for them; the row then shows only
     /// Pair or Remove, the same choice the Settings app makes.</summary>
     public bool AudioConnectable
     {
@@ -421,9 +378,6 @@ public sealed class BluetoothDeviceEntry : INotifyPropertyChanged
         ? "Working..."
         : Connected ? "Connected"
         : Paired ? "Paired" : CanPair ? "Available" : "Not available";
-
-    /// <summary>Gets whether the second line has anything to say.</summary>
-    public bool HasStatusLine => StatusLine.Length > 0;
 
     private void Set(ref bool field, bool value, string name)
     {

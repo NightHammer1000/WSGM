@@ -1,9 +1,0 @@
-[package]
-name = "steam-input-recovery"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
-
-[dependencies]
-iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder"] }

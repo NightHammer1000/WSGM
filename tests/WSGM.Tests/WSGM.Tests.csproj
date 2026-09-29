@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -22,8 +23,10 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="../../external/WSGM.Device.Sdk/src/WSGM.Device.Sdk/WSGM.Device.Sdk.csproj" />
     <ProjectReference Include="../../src/WSGM.Launch/WSGM.Launch.csproj" />
     <ProjectReference Include="../../src/WSGM/WSGM.csproj" />
+    <ProjectReference Include="../../external/steam-ui-toolkit/src/SteamUiToolkit/SteamUiToolkit.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- The service's pure decision core is linked as source (its BootManifest

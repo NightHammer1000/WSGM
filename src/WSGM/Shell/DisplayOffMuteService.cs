@@ -1,59 +1,118 @@
 using System;
 using Avalonia.Threading;
+using WindowsDeviceControl;
 using WSGM.Core;
 using WSGM.Interop;
 
 namespace WSGM.Shell;
 
+/// <summary>What the display-off mute service should do after one policy input changes.</summary>
+internal enum DisplayMuteAction
+{
+    /// <summary>The current state already satisfies the policy.</summary>
+    NoChange,
+
+    /// <summary>The screen went dark — mute if the user has not muted already.</summary>
+    Mute,
+
+    /// <summary>The screen is lit again — undo a mute this process applied.</summary>
+    Restore,
+
+    /// <summary>The last download stopped while the screen remains dark — restore
+    /// after the completion grace period unless activity resumes.</summary>
+    DelayRestore,
+}
+
+/// <summary>Pure decision logic for <see cref="DisplayOffMuteService"/>. Kept separate so
+/// the state mapping and the wrap-safe input-tick comparison are unit-testable without a
+/// message window or an audio endpoint.</summary>
+internal static class DisplayMuteDecider
+{
+    /// <summary>Grace after the last active download before audio is restored while
+    /// the screen remains dark.</summary>
+    internal static readonly TimeSpan DownloadCompletionRestoreDelay = TimeSpan.FromSeconds(10);
+
+    /// <summary>MONITOR_DISPLAY_STATE: the display is off.</summary>
+    internal const int DisplayOff = 0;
+
+    /// <summary>MONITOR_DISPLAY_STATE: the display is on.</summary>
+    internal const int DisplayOn = 1;
+
+    /// <summary>MONITOR_DISPLAY_STATE: the display is dimmed (still lit).</summary>
+    internal const int DisplayDimmed = 2;
+
+    /// <summary>Returns whether a MONITOR_DISPLAY_STATE value is the documented
+    /// display-off value.
+    ///
+    /// <para>Every other value is treated as lit, including "dimmed" and any value
+    /// Windows may add later. The asymmetry is deliberate and fail-safe: a dimmed
+    /// screen is still in front of the user, and an unknown value must never be the
+    /// reason a device stays silent.</para></summary>
+    /// <param name="state">The reported MONITOR_DISPLAY_STATE.</param>
+    /// <returns>True only for the documented off value.</returns>
+    internal static bool IsDisplayOff(int state) => state == DisplayOff;
+
+    /// <summary>Reconciles the feature setting, display state, Steam download state,
+    /// and ownership of the current mute. Muting requires every positive condition;
+    /// restoration is immediate when the display is lit or the setting is disabled,
+    /// but an idle transition while the display remains dark receives a grace period
+    /// so adjacent queue items do not flap the endpoint.</summary>
+    /// <param name="enabled">Whether the user enabled download-aware muting.</param>
+    /// <param name="displayOff">Whether this session's display is known to be dark.</param>
+    /// <param name="downloadActive">Whether Steam reports an active download.</param>
+    /// <param name="mutedByUs">Whether WSGM owns the current mute.</param>
+    /// <returns>The side effect the service should perform next.</returns>
+    internal static DisplayMuteAction Reconcile(
+        bool enabled,
+        bool displayOff,
+        bool downloadActive,
+        bool mutedByUs)
+    {
+        if (!mutedByUs)
+        {
+            return enabled && displayOff && downloadActive
+                ? DisplayMuteAction.Mute
+                : DisplayMuteAction.NoChange;
+        }
+        if (!enabled || !displayOff)
+        {
+            return DisplayMuteAction.Restore;
+        }
+        return downloadActive
+            ? DisplayMuteAction.NoChange
+            : DisplayMuteAction.DelayRestore;
+    }
+
+    /// <summary>Whether a notification source may be believed when it says the screen went
+    /// dark. Only <see cref="DisplayStateSource.Session"/> describes this session's own
+    /// display; the console and legacy settings are registered purely as redundant WAKE
+    /// sources, so a stale or cross-session "off" from them must never start a mute. Every
+    /// source may report the screen coming back — that direction is the fail-safe one.
+    /// </summary>
+    /// <param name="source">The setting that delivered the notification.</param>
+    /// <returns>True when the source is authoritative for a dark screen.</returns>
+    internal static bool MayReportDark(DisplayStateSource source) =>
+        source == DisplayStateSource.Session;
+
+    /// <summary>Whether new keyboard/mouse/touch input arrived since the baseline taken
+    /// when the screen went dark. GetLastInputInfo reports a 32-bit tick count that wraps
+    /// roughly every 49 days, so the comparison is an unchecked signed difference rather
+    /// than <c>&gt;</c> on the raw values.</summary>
+    /// <param name="baselineTick">The tick count captured at mute time.</param>
+    /// <param name="currentTick">The tick count read now.</param>
+    /// <returns>True when input happened after the baseline.</returns>
+    internal static bool HasInputSince(uint baselineTick, uint currentTick) =>
+        unchecked((int)(currentTick - baselineTick)) > 0;
+}
+
 /// <summary>Mutes system audio only while the screen is off and Steam is downloading.
 /// It restores immediately when the screen comes back, or ten seconds after the last
-/// active download stops.
+/// active download stops. Only a mute WSGM itself applied is ever undone.
 ///
-/// <para>The problem this solves: keep-awake deliberately lets the display time out
-/// while downloads continue (that is the whole point — Wi-Fi and Steam keep running on
-/// a Modern-Standby handheld), but Steam plays a notification sound every time a
-/// download finishes, into a dark room.</para>
-///
-/// <para>The signal is <c>GUID_SESSION_DISPLAY_STATUS</c> via
-/// <see cref="MessageWindow.RegisterDisplayStateNotifications"/> — Microsoft documents
-/// that setting as the one interactive user-mode apps must use (the console variant is
-/// for services). It does fire when the Claw's screen times out under Modern Standby
-/// (device-verified 2026-08-13); the <c>Display state:</c> log lines are what proves it.
-/// </para>
-///
-/// <para><b>Coming back must not depend on one notification arriving, nor on the audio
-/// endpoint being readable the instant it does</b> (reported 2026-08-19: a mute applied at
-/// screen-off while downloading never came back). The wake side therefore listens on
-/// everything Windows offers — there is no API to <i>query</i> display power state from
-/// user mode, so notifications are the only mechanism — and every one of these restores:
-/// </para>
-/// <list type="bullet">
-/// <item><description><c>GUID_SESSION_DISPLAY_STATUS</c>, the documented primary and the
-/// only source allowed to report the screen going DARK.</description></item>
-/// <item><description><c>GUID_CONSOLE_DISPLAY_STATE</c> and the superseded
-/// <c>GUID_MONITOR_POWER_ON</c>, registered as redundant wake sources.</description></item>
-/// <item><description>Session unlock (<c>WM_WTSSESSION_CHANGE</c>), for a wake that ends
-/// at a sign-in prompt.</description></item>
-/// <item><description><c>GetLastInputInfo</c> advancing past the baseline taken at mute
-/// time. <b>This one has a known blind spot</b>: it tracks keyboard/mouse/touch, not
-/// gamepads and not the power button, so a user who wakes with the power button and then
-/// navigates only with a controller is not covered by it — the notifications above are.
-/// </description></item>
-/// </list>
-///
-/// <para>Two further rules keep a restore from being lost once it is triggered:</para>
-/// <list type="number">
-/// <item><description>The "we muted this" claim is cleared only after the unmute is
-/// <i>confirmed</i>. The default endpoint is re-enumerated when the display wakes, so a
-/// read or a toggle can fail on the first attempt; clearing the claim before attempting
-/// anything stranded the mute permanently with nothing left to retry.</description></item>
-/// <item><description>A failed attempt is retried on a short timer that runs only while
-/// the claim is outstanding.</description></item>
-/// </list>
-///
-/// <para>Only a mute WSGM itself applied is undone. If the user had already muted the
-/// device before the screen went off, the screen coming back leaves it muted — the
-/// alternative would silently unmute someone who muted on purpose.</para></summary>
+/// <para>The full contract — why the dark signal is <c>GUID_SESSION_DISPLAY_STATUS</c>
+/// alone, why every other source may only wake, and the three rules that make the
+/// restore path robust — is device-verified behaviour recorded in
+/// <c>docs\power-and-display.md</c>. Change nothing here without reading it.</para></summary>
 public sealed class DisplayOffMuteService : IDisposable
 {
     // Long enough to stay invisible next to a screen-off period measured in hours,
@@ -271,7 +330,7 @@ public sealed class DisplayOffMuteService : IDisposable
             Log.Info("Mute on display off: already muted, leaving it alone.");
             return;
         }
-        if (Toggle())
+        if (SetMuted(true))
         {
             _mutedByUs = true;
             _inputRecoveryLogged = false;
@@ -306,7 +365,7 @@ public sealed class DisplayOffMuteService : IDisposable
             SyncRecoveryTimer();
             return;
         }
-        if (!Toggle())
+        if (!SetMuted(false))
         {
             _restorePending = true;
             SyncRecoveryTimer();
@@ -383,7 +442,7 @@ public sealed class DisplayOffMuteService : IDisposable
         muted = false;
         try
         {
-            var hr = NativeVolumeControl.GetVolume(out _, out var value);
+            var hr = CoreAudio.GetVolume(out _, out var value);
             if (hr < 0)
             {
                 Log.Warn($"Mute on display off: reading the volume failed (0x{hr:X8}).");
@@ -394,29 +453,26 @@ public sealed class DisplayOffMuteService : IDisposable
         }
         catch (Exception ex)
         {
-            Log.Warn($"Mute on display off: volume helper unavailable ({ex.Message}).");
+            Log.Warn($"Mute on display off: volume state unavailable ({ex.Message}).");
             return false;
         }
     }
 
-    // The native helper exposes a mute TOGGLE (the APPCOMMAND the volume keys send),
-    // not an absolute set; every caller here checks the current state first.
-    private static bool Toggle()
+    private static bool SetMuted(bool muted)
     {
         try
         {
-            const int appCommandVolumeMute = 8;
-            var hr = NativeVolumeControl.ApplyCommand(appCommandVolumeMute, out _, out _);
+            var hr = CoreAudio.SetMuted(muted);
             if (hr < 0)
             {
-                Log.Warn($"Mute on display off: toggling mute failed (0x{hr:X8}).");
+                Log.Warn($"Mute on display off: setting muted={muted} failed (0x{hr:X8}).");
                 return false;
             }
             return true;
         }
         catch (Exception ex)
         {
-            Log.Warn($"Mute on display off: volume helper unavailable ({ex.Message}).");
+            Log.Warn($"Mute on display off: volume state unavailable ({ex.Message}).");
             return false;
         }
     }

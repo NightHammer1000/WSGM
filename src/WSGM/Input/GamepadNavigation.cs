@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
+using WSGM.Controls;
 using WSGM.Core;
 
 namespace WSGM.Input;
@@ -11,7 +12,7 @@ namespace WSGM.Input;
 /// focus in the matching visual direction, A activates (synthesized Enter), B invokes a back
 /// action. Arrow keys mirror the D-pad so windows that hold real keyboard focus
 /// (Settings) are also navigable by Steam Input's desktop-layout key emission.
-/// Deterministic and AOT-safe.</summary>
+/// Deterministic so both controller-input paths apply the same action.</summary>
 public sealed class GamepadNavigation : IDisposable
 {
     // A single physical D-pad press reaches this class twice when Steam Input is
@@ -28,12 +29,13 @@ public sealed class GamepadNavigation : IDisposable
     // reads on the device as "the controller went dead" with nothing in the log.
     private const long CrossSourceSuppressionMs = 250;
 
-    private readonly GamepadService _gamepad;
+    private readonly IUiButtonSource _gamepad;
     private readonly Window _window;
     private readonly Action _back;
     private readonly Func<bool>? _isNintendoLayout;
     private readonly Func<InputElement?>? _preferredFocus;
     private readonly Action<InputElement?>? _secondary;
+    private readonly Action<InputElement?>? _tertiary;
     private readonly Action? _tabPrevious;
     private readonly Action? _tabNext;
 
@@ -88,10 +90,13 @@ public sealed class GamepadNavigation : IDisposable
     /// Null leaves the button unhandled.</param>
     /// <param name="onEdge">Optional callback when a directional move finds no target in
     /// that direction (a window edge) — used to cross focus into an adjacent window.</param>
-    public GamepadNavigation(GamepadService gamepad, Window window, Action back,
+    /// <param name="tertiary">Optional action for the physical north button (Xbox Y),
+    /// invoked with the currently focused element — the sheet's next-app cycle.</param>
+    public GamepadNavigation(IUiButtonSource gamepad, Window window, Action back,
         Func<bool>? isNintendoLayout = null, Func<InputElement?>? preferredFocus = null,
         Action<InputElement?>? secondary = null, Action? tabPrevious = null,
-        Action? tabNext = null, Action<NavigationDirection>? onEdge = null)
+        Action? tabNext = null, Action<NavigationDirection>? onEdge = null,
+        Action<InputElement?>? tertiary = null)
     {
         _gamepad = gamepad;
         _window = window;
@@ -99,6 +104,7 @@ public sealed class GamepadNavigation : IDisposable
         _isNintendoLayout = isNintendoLayout;
         _preferredFocus = preferredFocus;
         _secondary = secondary;
+        _tertiary = tertiary;
         _tabPrevious = tabPrevious;
         _tabNext = tabNext;
         _onEdge = onEdge;
@@ -161,6 +167,12 @@ public sealed class GamepadNavigation : IDisposable
             _secondary(target);
             return;
         }
+        // Physical north button, likewise position-stable across layouts.
+        if (_tertiary is not null && buttons.HasFlag(GamepadButtons.Y))
+        {
+            _tertiary(target);
+            return;
+        }
         // Shoulder buttons cycle tab strips where the host wired them up.
         // ButtonPressed is edge-triggered, so each physical press fires once.
         if (_tabPrevious is not null && buttons.HasFlag(GamepadButtons.LeftShoulder))
@@ -200,6 +212,18 @@ public sealed class GamepadNavigation : IDisposable
                 buttons.HasFlag(GamepadButtons.DPadRight));
             return;
         }
+        // The color spectrum keeps Left/Right for its hue sweep, exactly like a horizontal
+        // slider; Up/Down still move focus so the d-pad can reach the channel sliders below it.
+        if (target is DeviceColorSpectrum spectrum
+            && (buttons.HasFlag(GamepadButtons.DPadLeft)
+                || buttons.HasFlag(GamepadButtons.DPadRight)))
+        {
+            _suppressKeyboardUntil = Environment.TickCount64 + CrossSourceSuppressionMs;
+            spectrum.ApplyDirection(buttons.HasFlag(GamepadButtons.DPadRight)
+                ? NavigationDirection.Right
+                : NavigationDirection.Left);
+            return;
+        }
         if (target is ComboBox { IsDropDownOpen: true } openSelector
             && (buttons.HasFlag(GamepadButtons.DPadUp)
                 || buttons.HasFlag(GamepadButtons.DPadDown)))
@@ -210,6 +234,13 @@ public sealed class GamepadNavigation : IDisposable
                 openSelector.SelectedIndex,
                 openSelector.ItemCount,
                 forward);
+            return;
+        }
+        if (target is CurveEditor curve
+            && DirectionForButtons(buttons) is { } curveDirection)
+        {
+            _suppressKeyboardUntil = Environment.TickCount64 + CrossSourceSuppressionMs;
+            curve.ApplyDirection(curveDirection);
             return;
         }
 
@@ -353,8 +384,8 @@ public sealed class GamepadNavigation : IDisposable
         // A closed ComboBox must let Up/Down leave the row; A opens it, after
         // which those directions select an item. Likewise, a horizontal Slider
         // keeps Left/Right while Up/Down continues through the visual layout.
-        var controlConsumesDirection = focused is TextBox
-            || (focused is Slider && e.Key is Key.Left or Key.Right)
+        var controlConsumesDirection = focused is TextBox or CurveEditor
+            || (focused is Slider or DeviceColorSpectrum && e.Key is Key.Left or Key.Right)
             || (focused is ComboBox { IsDropDownOpen: true }
                 && e.Key is Key.Up or Key.Down);
         if (controlConsumesDirection)

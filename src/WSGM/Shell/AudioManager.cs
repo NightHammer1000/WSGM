@@ -5,8 +5,8 @@ using System.ComponentModel;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
+using WindowsDeviceControl;
 using WSGM.Core;
-using WSGM.Interop;
 
 namespace WSGM.Shell;
 
@@ -46,28 +46,44 @@ public sealed class AudioEndpointEntry : INotifyPropertyChanged
 }
 
 /// <summary>Live master-volume and default audio-device state for the game-mode
-/// taskbar. Core Audio stays behind the native helper; potentially slow device
-/// enumeration runs away from the Avalonia UI thread.</summary>
+/// taskbar. Potentially slow Core Audio enumeration runs away from the Avalonia
+/// UI thread.</summary>
 public sealed class AudioManager : INotifyPropertyChanged, IDisposable
 {
-    private readonly Func<string, int> _setDefaultEndpoint;
-    private readonly Action<Action> _postEndpointCompletion;
-
-    /// <summary>Creates a manager backed by the shipped native Core Audio helper.</summary>
-    public AudioManager()
-        : this(NativeVolumeControl.SetDefaultEndpoint, action => Dispatcher.UIThread.Post(action))
-    {
-    }
-
-    /// <summary>Creates a manager with endpoint-selection seams for isolated tests.</summary>
-    internal AudioManager(Func<string, int> setDefaultEndpoint, Action<Action> postEndpointCompletion)
-    {
-        _setDefaultEndpoint = setDefaultEndpoint;
-        _postEndpointCompletion = postEndpointCompletion;
-    }
-
     /// <summary>Raised after a bindable audio property changes.</summary>
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>Revision bookkeeping for one data flow's default-endpoint writes:
+    /// rapid selections each take a revision, only the newest may publish UI
+    /// state, and the flow counts as pending until that newest revision
+    /// completes. Pure, so the latest-wins rule is testable without Core Audio;
+    /// the writes themselves are additionally serialized by a per-flow gate.</summary>
+    internal struct EndpointSelectionTracker
+    {
+        private int _requested;
+        private int _completed;
+
+        /// <summary>Claims the next revision for a new selection.</summary>
+        internal int Begin() => Interlocked.Increment(ref _requested);
+
+        /// <summary>Whether this revision is still the newest selection.</summary>
+        internal bool IsCurrent(int revision) => revision == Volatile.Read(ref _requested);
+
+        /// <summary>Whether a selection is still in flight — the refresh path must
+        /// not overwrite the user's choice with a stale default meanwhile.</summary>
+        internal bool Pending =>
+            Volatile.Read(ref _requested) != Volatile.Read(ref _completed);
+
+        /// <summary>Records this revision's write as finished. A stale revision is
+        /// ignored: the newer selection it lost to is still pending.</summary>
+        internal void Complete(int revision)
+        {
+            if (IsCurrent(revision))
+            {
+                Volatile.Write(ref _completed, revision);
+            }
+        }
+    }
 
     /// <summary>Gets the active playback endpoints.</summary>
     public ObservableCollection<AudioEndpointEntry> OutputEndpoints { get; } = [];
@@ -103,6 +119,53 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
 
     /// <summary>Gets the current master volume as display text.</summary>
     public string VolumeText => $"{(int)_volumePercent}%";
+
+    private double? _inputVolumePercent;
+
+    /// <summary>Gets or sets the default input's master volume, from 0 to 100.</summary>
+    /// <remarks>Null means Windows currently has no readable default capture endpoint.</remarks>
+    public double? InputVolumePercent
+    {
+        get => _inputVolumePercent;
+        set
+        {
+            if (value is not { } requested)
+            {
+                return;
+            }
+
+            int normalized = NormalizeVolume(requested);
+            if (_inputVolumePercent is { } current && Math.Abs(current - normalized) < 0.01)
+            {
+                return;
+            }
+
+            _inputVolumePercent = normalized;
+            Interlocked.Increment(ref _inputVolumeRevision);
+            if (normalized > 0)
+            {
+                InputMuted = false;
+            }
+            Raise(nameof(InputVolumePercent));
+            QueueInputVolumeWrite(normalized);
+        }
+    }
+
+    private bool _inputMuted;
+
+    /// <summary>Gets whether the default input endpoint is muted.</summary>
+    public bool InputMuted
+    {
+        get => _inputMuted;
+        private set
+        {
+            if (_inputMuted != value)
+            {
+                _inputMuted = value;
+                Raise(nameof(InputMuted));
+            }
+        }
+    }
 
     private bool _muted;
 
@@ -141,7 +204,7 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
 
     private string _errorText = "";
 
-    /// <summary>Gets a non-fatal audio-helper error to show in the panel.</summary>
+    /// <summary>Gets a non-fatal audio error to show in the panel.</summary>
     public string ErrorText
     {
         get => _errorText;
@@ -163,18 +226,20 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
     private int _ticks;
     private int _refreshing;
     private int _volumeRevision;
+    private int _inputVolumeRevision;
     private bool _disposed;
     private bool _stickyError;
     private string _endpointSummary = "";
     private readonly object _volumeGate = new();
+    private readonly object _inputVolumeGate = new();
     private readonly SemaphoreSlim _outputSelectionGate = new(1, 1);
     private readonly SemaphoreSlim _inputSelectionGate = new(1, 1);
     private int? _pendingVolume;
     private bool _volumeWorkerRunning;
-    private int _outputSelectionRevision;
-    private int _inputSelectionRevision;
-    private int _outputCompletedSelectionRevision;
-    private int _inputCompletedSelectionRevision;
+    private int? _pendingInputVolume;
+    private bool _inputVolumeWorkerRunning;
+    private EndpointSelectionTracker _outputSelection;
+    private EndpointSelectionTracker _inputSelection;
     private bool _hasOutputSnapshot;
 
     /// <summary>Performs an immediate refresh and starts live audio updates.
@@ -212,11 +277,12 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
             return;
         }
         var volumeRevision = Volatile.Read(ref _volumeRevision);
+        var inputVolumeRevision = Volatile.Read(ref _inputVolumeRevision);
         _ = Task.Run(() =>
         {
             try
             {
-                var snapshot = ReadSnapshot(includeEndpoints, volumeRevision);
+                var snapshot = ReadSnapshot(includeEndpoints, volumeRevision, inputVolumeRevision);
                 Dispatcher.UIThread.Post(() =>
                 {
                     if (!_disposed)
@@ -224,14 +290,6 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
                         Apply(snapshot);
                     }
                 });
-            }
-            catch (DllNotFoundException ex)
-            {
-                PostFailure($"Audio controls are unavailable: {ex.Message}", sticky: true);
-            }
-            catch (EntryPointNotFoundException ex)
-            {
-                PostFailure($"Audio controls need the matching native helper: {ex.Message}", sticky: true);
             }
             catch (Exception ex)
             {
@@ -249,15 +307,26 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         int Volume,
         bool Muted,
         int VolumeRevision,
+        int InputVolumeResult,
+        int InputVolume,
+        bool InputMuted,
+        int InputVolumeRevision,
         bool IncludedEndpoints,
         int OutputResult,
-        IReadOnlyList<NativeVolumeControl.AudioEndpoint> Outputs,
+        IReadOnlyList<CoreAudio.AudioEndpoint> Outputs,
         int InputResult,
-        IReadOnlyList<NativeVolumeControl.AudioEndpoint> Inputs);
+        IReadOnlyList<CoreAudio.AudioEndpoint> Inputs);
 
-    private static Snapshot ReadSnapshot(bool includeEndpoints, int volumeRevision)
+    private static Snapshot ReadSnapshot(
+        bool includeEndpoints,
+        int volumeRevision,
+        int inputVolumeRevision)
     {
-        var volumeResult = NativeVolumeControl.GetVolume(out var volume, out var muted);
+        var volumeResult = CoreAudio.GetVolume(out var volume, out var muted);
+        var inputVolumeResult = CoreAudio.GetVolume(
+            CoreAudio.AudioDirection.Capture,
+            out var inputVolume,
+            out var inputMuted);
         if (!includeEndpoints)
         {
             return new Snapshot(
@@ -265,6 +334,10 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
                 volume,
                 muted != 0,
                 volumeRevision,
+                inputVolumeResult,
+                inputVolume,
+                inputMuted != 0,
+                inputVolumeRevision,
                 false,
                 0,
                 [],
@@ -272,56 +345,22 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
                 []);
         }
 
-        var outputResult = ReadEndpoints(NativeVolumeControl.Render, out var outputs);
-        var inputResult = ReadEndpoints(NativeVolumeControl.Capture, out var inputs);
+        var outputResult = CoreAudio.ListEndpoints(CoreAudio.AudioDirection.Render, out var outputs);
+        var inputResult = CoreAudio.ListEndpoints(CoreAudio.AudioDirection.Capture, out var inputs);
         return new Snapshot(
             volumeResult,
             volume,
             muted != 0,
             volumeRevision,
+            inputVolumeResult,
+            inputVolume,
+            inputMuted != 0,
+            inputVolumeRevision,
             true,
             outputResult,
             outputs,
             inputResult,
             inputs);
-    }
-
-    private static int ReadEndpoints(
-        int flow,
-        out IReadOnlyList<NativeVolumeControl.AudioEndpoint> endpoints)
-    {
-        var result = NativeVolumeControl.ListEndpoints(flow, out var items, out var count);
-        var records = new List<NativeVolumeControl.AudioEndpoint>();
-        try
-        {
-            if (result < 0 || items == 0)
-            {
-                endpoints = records;
-                return result;
-            }
-            // This is an in-process helper, but keep a corrupt count from walking
-            // arbitrary memory if a mismatched DLL is ever shipped beside WSGM.
-            if (count > 4096)
-            {
-                endpoints = records;
-                return unchecked((int)0x8007000D); // ERROR_INVALID_DATA
-            }
-            for (uint index = 0; index < count; index++)
-            {
-                records.Add(NativeVolumeControl.ReadEndpoint(
-                    items + (nint)(index * NativeVolumeControl.EndpointRecordSize)));
-            }
-        }
-        finally
-        {
-            if (items != 0)
-            {
-                NativeVolumeControl.FreeEndpoints(items);
-            }
-        }
-        records.Sort((left, right) => right.IsDefault.CompareTo(left.IsDefault));
-        endpoints = records;
-        return result;
     }
 
     private void Apply(Snapshot snapshot)
@@ -342,6 +381,26 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
             SetFailure("read volume", snapshot.VolumeResult);
         }
 
+        if (snapshot.InputVolumeRevision == Volatile.Read(ref _inputVolumeRevision))
+        {
+            if (snapshot.InputVolumeResult >= 0)
+            {
+                ApplyInputVolume(snapshot.InputVolume, snapshot.InputMuted);
+                Log.Change(
+                    "audio.capture.volume",
+                    $"Default microphone volume is {snapshot.InputVolume}% "
+                        + $"(muted={snapshot.InputMuted}).");
+            }
+            else
+            {
+                ClearInputVolume();
+                Log.Change(
+                    "audio.capture.volume",
+                    $"Default microphone volume is unavailable "
+                        + $"(HRESULT 0x{snapshot.InputVolumeResult:X8}).");
+            }
+        }
+
         if (!snapshot.IncludedEndpoints)
         {
             return;
@@ -349,7 +408,7 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         if (snapshot.OutputResult >= 0)
         {
             Reconcile(OutputEndpoints, snapshot.Outputs);
-            if (!EndpointSelectionPending(output: true))
+            if (!_outputSelection.Pending)
             {
                 var previousOutputId = _selectedOutput?.Id;
                 var defaultOutput = FindDefault(OutputEndpoints, snapshot.Outputs);
@@ -370,7 +429,7 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         if (snapshot.InputResult >= 0)
         {
             Reconcile(InputEndpoints, snapshot.Inputs);
-            if (!EndpointSelectionPending(output: false))
+            if (!_inputSelection.Pending)
             {
                 SetSelected(output: false, FindDefault(InputEndpoints, snapshot.Inputs));
             }
@@ -383,7 +442,11 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         {
             var summary = $"Audio endpoints: {OutputEndpoints.Count} output(s), "
                 + $"default='{SelectedOutput?.Name ?? "none"}'; {InputEndpoints.Count} input(s), "
-                + $"default='{SelectedInput?.Name ?? "none"}'; volume={(int)VolumePercent}%, muted={Muted}.";
+                + $"default='{SelectedInput?.Name ?? "none"}'; volume={(int)VolumePercent}%, muted={Muted}; "
+                + $"microphone={(InputVolumePercent is { } inputVolume
+                    ? inputVolume.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + "%"
+                    : "unavailable")}, "
+                + $"muted={InputMuted}.";
             if (_endpointSummary != summary)
             {
                 _endpointSummary = summary;
@@ -404,9 +467,33 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         Muted = muted;
     }
 
+    private void ApplyInputVolume(int percentage, bool muted)
+    {
+        int normalized = NormalizeVolume(percentage);
+        if (_inputVolumePercent is not { } current || Math.Abs(current - normalized) >= 0.01)
+        {
+            _inputVolumePercent = normalized;
+            Raise(nameof(InputVolumePercent));
+        }
+        InputMuted = muted;
+    }
+
+    private void ClearInputVolume()
+    {
+        if (_inputVolumePercent is null)
+        {
+            return;
+        }
+
+        _inputVolumePercent = null;
+        _inputMuted = false;
+        Raise(nameof(InputVolumePercent));
+        Raise(nameof(InputMuted));
+    }
+
     private static AudioEndpointEntry? FindDefault(
         ObservableCollection<AudioEndpointEntry> entries,
-        IReadOnlyList<NativeVolumeControl.AudioEndpoint> snapshot)
+        IReadOnlyList<CoreAudio.AudioEndpoint> snapshot)
     {
         string? defaultId = null;
         foreach (var endpoint in snapshot)
@@ -435,9 +522,9 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
     /// destroy an open combo box or its focused item.</summary>
     internal static void Reconcile(
         ObservableCollection<AudioEndpointEntry> entries,
-        IReadOnlyList<NativeVolumeControl.AudioEndpoint> fresh)
+        IReadOnlyList<CoreAudio.AudioEndpoint> fresh)
     {
-        var remaining = new Dictionary<string, NativeVolumeControl.AudioEndpoint>(StringComparer.Ordinal);
+        var remaining = new Dictionary<string, CoreAudio.AudioEndpoint>(StringComparer.Ordinal);
         foreach (var endpoint in fresh)
         {
             remaining.TryAdd(endpoint.Id, endpoint);
@@ -472,9 +559,7 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         }
         SetSelected(output, value);
         var kind = output ? "output" : "input";
-        var revision = output
-            ? Interlocked.Increment(ref _outputSelectionRevision)
-            : Interlocked.Increment(ref _inputSelectionRevision);
+        var revision = Tracker(output).Begin();
         Log.Info($"Audio {kind} selected: '{value.Name}'.");
         _ = Task.Run(() => ApplyEndpointSelection(value.Id, output, kind, revision));
     }
@@ -488,20 +573,21 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         gate.Wait();
         try
         {
-            if (_disposed || !IsCurrentEndpointSelection(output, revision))
+            if (_disposed || !Tracker(output).IsCurrent(revision))
             {
                 return;
             }
             try
             {
-                var result = _setDefaultEndpoint(endpointId);
-                if (IsCurrentEndpointSelection(output, revision))
+                var result = CoreAudio.SetDefaultEndpoint(endpointId);
+                if (result >= 0 && output)
                 {
-                    MarkEndpointSelectionCompleted(output, revision);
+                    VolumeFeedback.Reinitialize();
                 }
-                _postEndpointCompletion(() =>
+                Tracker(output).Complete(revision);
+                Dispatcher.UIThread.Post(() =>
                 {
-                    if (_disposed || !IsCurrentEndpointSelection(output, revision))
+                    if (_disposed || !Tracker(output).IsCurrent(revision))
                     {
                         return;
                     }
@@ -519,12 +605,12 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
                     QueueRefresh(includeEndpoints: true);
                 });
             }
-            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+            catch (Exception ex)
             {
-                if (IsCurrentEndpointSelection(output, revision))
+                if (Tracker(output).IsCurrent(revision))
                 {
-                    MarkEndpointSelectionCompleted(output, revision);
-                    PostFailure($"Audio {kind} selection is unavailable: {ex.Message}", sticky: true);
+                    Tracker(output).Complete(revision);
+                    PostFailure($"Audio {kind} selection failed: {ex.Message}", sticky: true);
                 }
             }
         }
@@ -534,30 +620,8 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private bool IsCurrentEndpointSelection(bool output, int revision)
-        => revision == (output
-            ? Volatile.Read(ref _outputSelectionRevision)
-            : Volatile.Read(ref _inputSelectionRevision));
-
-    private bool EndpointSelectionPending(bool output)
-        => (output
-            ? Volatile.Read(ref _outputSelectionRevision)
-            : Volatile.Read(ref _inputSelectionRevision))
-            != (output
-                ? Volatile.Read(ref _outputCompletedSelectionRevision)
-                : Volatile.Read(ref _inputCompletedSelectionRevision));
-
-    private void MarkEndpointSelectionCompleted(bool output, int revision)
-    {
-        if (output)
-        {
-            Volatile.Write(ref _outputCompletedSelectionRevision, revision);
-        }
-        else
-        {
-            Volatile.Write(ref _inputCompletedSelectionRevision, revision);
-        }
-    }
+    private ref EndpointSelectionTracker Tracker(bool output)
+        => ref (output ? ref _outputSelection : ref _inputSelection);
 
     private void SetSelected(bool output, AudioEndpointEntry? value)
     {
@@ -608,7 +672,7 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
 
                     try
                     {
-                        var result = NativeVolumeControl.SetVolume(requested, out var muted);
+                        var result = CoreAudio.SetVolume(requested, out var muted);
                         if (result >= 0)
                         {
                             Log.Info($"Taskbar volume set to {requested}% (muted={muted != 0}).");
@@ -629,16 +693,10 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
                         }
                     }
                     catch (Exception ex)
-                        when (ex is DllNotFoundException or EntryPointNotFoundException)
                     {
-                        PostFailure($"Volume control is unavailable: {ex.Message}", sticky: true);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Anything else out of the native write is reported and
-                        // the worker carries on. Letting it unwind the loop would
-                        // strand _volumeWorkerRunning at true, and every later
-                        // slider move would then be dropped in silence.
+                        // Report and carry on: unwinding the loop would strand
+                        // _volumeWorkerRunning at true and silently drop every
+                        // later slider move.
                         PostFailure($"Volume write failed: {ex.Message}", sticky: true);
                     }
                 }
@@ -656,7 +714,100 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         });
     }
 
-    /// <summary>Rounds and bounds a slider value for the native integer ABI.</summary>
+    private void QueueInputVolumeWrite(int percentage)
+    {
+        lock (_inputVolumeGate)
+        {
+            _pendingInputVolume = percentage;
+            if (_inputVolumeWorkerRunning)
+            {
+                return;
+            }
+            _inputVolumeWorkerRunning = true;
+        }
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                while (true)
+                {
+                    int requested;
+                    lock (_inputVolumeGate)
+                    {
+                        if (_pendingInputVolume is not int pending || _disposed)
+                        {
+                            _inputVolumeWorkerRunning = false;
+                            return;
+                        }
+                        requested = pending;
+                        _pendingInputVolume = null;
+                    }
+
+                    try
+                    {
+                        int result = CoreAudio.SetVolume(
+                            CoreAudio.AudioDirection.Capture,
+                            requested,
+                            out int muted);
+                        if (result >= 0)
+                        {
+                            Log.Info(
+                                $"Microphone volume set to {requested}% (muted={muted != 0}).");
+                            Dispatcher.UIThread.Post(() =>
+                            {
+                                if (!_disposed)
+                                {
+                                    ApplyInputVolume(requested, muted != 0);
+                                    _stickyError = false;
+                                    ErrorText = "";
+                                }
+                            });
+                        }
+                        else
+                        {
+                            PostFailure(
+                                $"Set microphone volume failed (HRESULT 0x{result:X8}).",
+                                sticky: true);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        PostFailure($"Microphone volume write failed: {ex.Message}", sticky: true);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                lock (_inputVolumeGate)
+                {
+                    _inputVolumeWorkerRunning = false;
+                }
+                Log.Warn($"Microphone volume write worker stopped: {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>Adopts a volume state another WSGM writer has ALREADY applied to
+    /// Core Audio — the hardware volume buttons — so the taskbar slider does not
+    /// lag one poll behind the OSD. Presentation only: nothing is written back,
+    /// and the revision bump keeps an older in-flight snapshot from undoing the
+    /// adopted value before the next poll confirms it.</summary>
+    /// <param name="percent">The volume the writer landed on, 0-100.</param>
+    /// <param name="muted">The mute state the writer landed on.</param>
+    internal void NoteExternalVolume(int percent, bool muted)
+    {
+        Interlocked.Increment(ref _volumeRevision);
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_disposed)
+            {
+                ApplyVolume(percent, muted);
+            }
+        });
+    }
+
+    /// <summary>Rounds and bounds a slider value for Core Audio.</summary>
     /// <param name="value">The raw slider or endpoint value.</param>
     /// <returns>An integer from 0 through 100.</returns>
     internal static int NormalizeVolume(double value)
@@ -686,8 +837,9 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
     public void Dispose()
     {
         _disposed = true;
-        Interlocked.Increment(ref _outputSelectionRevision);
-        Interlocked.Increment(ref _inputSelectionRevision);
+        // Invalidate every in-flight selection so its completion cannot publish.
+        _outputSelection.Begin();
+        _inputSelection.Begin();
         if (_timer is not null)
         {
             _timer.Stop();
@@ -697,6 +849,10 @@ public sealed class AudioManager : INotifyPropertyChanged, IDisposable
         lock (_volumeGate)
         {
             _pendingVolume = null;
+        }
+        lock (_inputVolumeGate)
+        {
+            _pendingInputVolume = null;
         }
     }
 }

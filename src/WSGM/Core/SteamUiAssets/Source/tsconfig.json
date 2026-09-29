@@ -1,0 +1,27 @@
+{
+  // Type-stripping only. The shipped asset is reviewable JavaScript that a
+  // maintainer can read next to the injected page, so this deliberately does not
+  // bundle, minify, downlevel, or add helpers — the emitted file should differ
+  // from the source only by having lost its type annotations.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    // The script reaches into Steam's minified React internals, which have no
+    // types and are not ours to invent. Requiring annotations there would produce
+    // fiction rather than safety, so implicit `any` is allowed at that boundary
+    // while every other strictness check stays on.
+    "noImplicitAny": false,
+    "noEmitOnError": true,
+    "removeComments": false,
+    "newLine": "lf",
+    "declaration": false,
+    "sourceMap": false,
+    "importHelpers": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
+  }
+}

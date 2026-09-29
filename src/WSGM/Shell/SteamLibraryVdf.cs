@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -19,7 +20,8 @@ namespace WSGM.Shell;
 /// ones. The same value goes into the card marker and the config registration.
 ///
 /// Everything here is pure string work so the exact bytes are unit-testable;
-/// file I/O lives in <see cref="SdFormatManager"/>.</summary>
+/// file I/O lives in <see cref="SdFormatManager"/>, except the one shared card-marker
+/// read (<see cref="TryReadMarkerContentId"/>).</summary>
 public static class SteamLibraryVdf
 {
     /// <summary>Generates a fresh library content id: a uniformly random integer
@@ -50,12 +52,12 @@ public static class SteamLibraryVdf
 
     /// <summary>Escapes a Windows path for a VDF string value.</summary>
     /// <param name="path">The plain path, e.g. <c>E:\SteamLibrary</c>.</param>
-    public static string EscapePath(string path) => path.Replace("\\", "\\\\");
+    internal static string EscapePath(string path) => path.Replace("\\", "\\\\");
 
     /// <summary>Escapes a VDF string value (backslash then double-quote), for the
     /// user-chosen library label.</summary>
     /// <param name="value">The raw value.</param>
-    public static string EscapeValue(string value) =>
+    internal static string EscapeValue(string value) =>
         value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
     /// <summary>Builds the card marker — <c>&lt;X&gt;:\SteamLibrary\libraryfolder.vdf</c>.</summary>
@@ -78,7 +80,7 @@ public static class SteamLibraryVdf
     /// <param name="contentId">The library id, matching the card marker.</param>
     /// <param name="totalSize">The volume size in bytes.</param>
     /// <param name="label">The user-chosen library label, or empty for none.</param>
-    public static string BuildConfigEntry(
+    internal static string BuildConfigEntry(
         int index, string libraryPath, string contentId, long totalSize, string label = "") =>
         $"\t\"{index}\"\n"
         + "\t{\n"
@@ -118,25 +120,6 @@ public static class SteamLibraryVdf
         return results;
     }
 
-    /// <summary>Whether the config already lists a library at this path (unescaped,
-    /// case-insensitive). Informational only — NOT used to dedup a write: a card
-    /// reader keeps one drive letter across swaps, so the path is legitimately
-    /// reused by every card, and Steam mounts a registered path by reading
-    /// whatever marker the currently-inserted card carries.</summary>
-    /// <param name="vdf">The config file text.</param>
-    /// <param name="libraryPath">The plain library path.</param>
-    public static bool IsRegistered(string vdf, string libraryPath)
-    {
-        foreach (var value in ValuesOf(vdf, "path"))
-        {
-            if (string.Equals(value, libraryPath, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /// <summary>Whether the config already contains an entry with this content id —
     /// the library's stable identity, which is what dedup keys on. Path is the
     /// wrong key: a reformatted card reuses the reader's drive letter but is a
@@ -162,42 +145,21 @@ public static class SteamLibraryVdf
     /// <param name="vdf">The current libraryfolders configuration text.</param>
     /// <param name="contentId">The library identity from its card marker.</param>
     /// <returns>The unescaped registered path, or null when the id is absent.</returns>
-    public static string? PathForContentId(string vdf, string contentId)
-    {
-        string? path = null;
-        string? currentId = null;
-        foreach (var rawLine in vdf.Split('\n'))
-        {
-            var line = rawLine.TrimEnd('\r');
-            if (IsTopLevelEntry(line))
-            {
-                if (string.Equals(currentId, contentId, StringComparison.Ordinal))
-                {
-                    return path;
-                }
-                path = null;
-                currentId = null;
-                continue;
-            }
-            if (TryReadValue(line, "path", out var candidatePath))
-            {
-                path = candidatePath;
-            }
-            else if (TryReadValue(line, "contentid", out var candidateId))
-            {
-                currentId = candidateId;
-            }
-        }
-        return string.Equals(currentId, contentId, StringComparison.Ordinal) ? path : null;
-    }
+    public static string? PathForContentId(string vdf, string contentId) =>
+        ValueForContentId(vdf, "path", contentId);
 
     /// <summary>Finds the label belonging to a specific content-id registration.</summary>
     /// <param name="vdf">The current libraryfolders configuration text.</param>
     /// <param name="contentId">The stable library identity.</param>
     /// <returns>The matching label, or null when the identity is absent.</returns>
-    public static string? LabelForContentId(string vdf, string contentId)
+    public static string? LabelForContentId(string vdf, string contentId) =>
+        ValueForContentId(vdf, "label", contentId);
+
+    /// <summary>The value of one key inside the block whose contentid matches, or
+    /// null when the identity is absent (or the block carries no such key).</summary>
+    private static string? ValueForContentId(string vdf, string key, string contentId)
     {
-        string? label = null;
+        string? value = null;
         string? currentId = null;
         foreach (var rawLine in vdf.Split('\n'))
         {
@@ -206,22 +168,22 @@ public static class SteamLibraryVdf
             {
                 if (string.Equals(currentId, contentId, StringComparison.Ordinal))
                 {
-                    return label;
+                    return value;
                 }
-                label = null;
+                value = null;
                 currentId = null;
                 continue;
             }
-            if (TryReadValue(line, "label", out var candidateLabel))
+            if (TryReadValue(line, key, out var candidate))
             {
-                label = candidateLabel;
+                value = candidate;
             }
             else if (TryReadValue(line, "contentid", out var candidateId))
             {
                 currentId = candidateId;
             }
         }
-        return string.Equals(currentId, contentId, StringComparison.Ordinal) ? label : null;
+        return string.Equals(currentId, contentId, StringComparison.Ordinal) ? value : null;
     }
 
     /// <summary>Rewrites the <c>label</c> of the library block whose content id
@@ -238,21 +200,7 @@ public static class SteamLibraryVdf
     public static bool TrySetLabel(string vdf, string contentId, string label, out string? updated)
     {
         updated = null;
-        var starts = new List<int>();
-        var lineStart = 0;
-        while (lineStart < vdf.Length)
-        {
-            var lineEnd = vdf.IndexOf('\n', lineStart);
-            if (lineEnd < 0)
-            {
-                lineEnd = vdf.Length;
-            }
-            if (IsTopLevelEntry(vdf[lineStart..lineEnd].TrimEnd('\r')))
-            {
-                starts.Add(lineStart);
-            }
-            lineStart = lineEnd + 1;
-        }
+        var starts = TopLevelEntryStarts(vdf);
 
         int blockStart = -1, blockEnd = -1;
         if (starts.Count == 0)
@@ -345,22 +293,7 @@ public static class SteamLibraryVdf
         {
             return false;
         }
-        var starts = new List<int>();
-        var lineStart = 0;
-        while (lineStart < vdf.Length)
-        {
-            var lineEnd = vdf.IndexOf('\n', lineStart);
-            if (lineEnd < 0)
-            {
-                lineEnd = vdf.Length;
-            }
-            var line = vdf[lineStart..lineEnd].TrimEnd('\r');
-            if (IsTopLevelEntry(line))
-            {
-                starts.Add(lineStart);
-            }
-            lineStart = lineEnd + 1;
-        }
+        var starts = TopLevelEntryStarts(vdf);
         var rootClose = vdf.LastIndexOf('}');
         for (var i = 0; i < starts.Count; i++)
         {
@@ -446,6 +379,86 @@ public static class SteamLibraryVdf
             updated = current;
         }
         return removed;
+    }
+
+    /// <summary>One top-level registration's key facts, as
+    /// <see cref="ReadEntries"/> reports them. Null means the block carries no
+    /// such line.</summary>
+    /// <param name="Index">The numbered block's key.</param>
+    /// <param name="Path">The unescaped library path.</param>
+    /// <param name="Label">The unescaped label.</param>
+    /// <param name="ContentId">The library's stable identity.</param>
+    public readonly record struct ConfigEntry(
+        int Index, string? Path, string? Label, string? ContentId);
+
+    /// <summary>Reads every top-level registration's path, label and content id,
+    /// each taken from ITS OWN block — index-zipping separate
+    /// <see cref="ValuesOf"/> lists silently mispairs them when a block lacks a
+    /// key.</summary>
+    /// <param name="vdf">The current libraryfolders configuration text.</param>
+    public static List<ConfigEntry> ReadEntries(string vdf)
+    {
+        var entries = new List<ConfigEntry>();
+        var inEntry = false;
+        var index = 0;
+        string? path = null, label = null, contentId = null;
+        foreach (var rawLine in vdf.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r');
+            if (IsTopLevelEntry(line))
+            {
+                if (inEntry)
+                {
+                    entries.Add(new ConfigEntry(index, path, label, contentId));
+                }
+                inEntry = true;
+                var end = line.IndexOf('"', 2);
+                index = int.Parse(line[2..end], NumberStyles.None, CultureInfo.InvariantCulture);
+                path = label = contentId = null;
+                continue;
+            }
+            if (!inEntry)
+            {
+                continue;
+            }
+            if (TryReadValue(line, "path", out var candidatePath))
+            {
+                path = candidatePath;
+            }
+            else if (TryReadValue(line, "label", out var candidateLabel))
+            {
+                label = candidateLabel;
+            }
+            else if (TryReadValue(line, "contentid", out var candidateId))
+            {
+                contentId = candidateId;
+            }
+        }
+        if (inEntry)
+        {
+            entries.Add(new ConfigEntry(index, path, label, contentId));
+        }
+        return entries;
+    }
+
+    /// <summary>Reads the content id a card's <c>libraryfolder.vdf</c> marker
+    /// carries — the one file read shared by the card features. False when the
+    /// marker is absent or holds no usable id. Deliberately does NOT catch IO
+    /// failures: the callers' policies for an unreadable marker differ (skip the
+    /// volume, refuse a restore), so the exception is theirs to handle.</summary>
+    /// <param name="libraryPath">The library root, e.g. <c>E:\SteamLibrary</c>.</param>
+    /// <param name="contentId">The first non-whitespace content id, or null.</param>
+    public static bool TryReadMarkerContentId(string libraryPath, out string? contentId)
+    {
+        contentId = null;
+        var marker = Path.Combine(libraryPath, "libraryfolder.vdf");
+        if (!File.Exists(marker))
+        {
+            return false;
+        }
+        contentId = ValuesOf(File.ReadAllText(marker), "contentid")
+            .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
+        return contentId is not null;
     }
 
     /// <summary>Canonical form used to decide whether two registrations name the
@@ -558,20 +571,18 @@ public static class SteamLibraryVdf
     /// <summary>The next free top-level entry index: highest existing numbered
     /// block + 1. Line-based scan for <c>\t"N"</c> at nesting depth one.</summary>
     /// <param name="vdf">The config file text.</param>
-    public static int NextIndex(string vdf)
+    internal static int NextIndex(string vdf)
     {
         var highest = -1;
         foreach (var rawLine in vdf.Split('\n'))
         {
-            // Depth-one block headers are exactly one tab, then a quoted integer.
-            if (rawLine.Length < 4 || rawLine[0] != '\t' || rawLine[1] != '"'
-                || rawLine.StartsWith("\t\t", StringComparison.Ordinal))
+            var line = rawLine.TrimEnd('\r');
+            if (!IsTopLevelEntry(line))
             {
                 continue;
             }
-            var end = rawLine.IndexOf('"', 2);
-            if (end > 2
-                && int.TryParse(rawLine[2..end], NumberStyles.None,
+            var end = line.IndexOf('"', 2);
+            if (int.TryParse(line[2..end], NumberStyles.None,
                     CultureInfo.InvariantCulture, out var index)
                 && index > highest)
             {

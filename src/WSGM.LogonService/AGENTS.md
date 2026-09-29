@@ -1,6 +1,6 @@
 # WSGM.LogonService
 
-This NativeAOT SYSTEM service reacts to user logon, reads the per-user boot manifest as untrusted
+This self-contained SYSTEM service reacts to user logon, reads the per-user boot manifest as untrusted
 input, launches WSGM as that user, and provides one-shot Explorer recovery after a dirty boot exit.
 
 - Do not use `ServiceBase`, COM, Avalonia, or user-directory logging. Service logs belong in

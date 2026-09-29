@@ -14,6 +14,9 @@ namespace WSGM.Shell;
 /// keep the handheld awake in both modes.</summary>
 public sealed class KeepAwakeService : IDisposable
 {
+    /// <summary>How many consecutive inactive polls it takes to drop the download hold.</summary>
+    internal const int ReleaseAfterInactivePolls = 2;
+
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
 
     private readonly WakeLock _manualStandbyLock =
@@ -289,7 +292,7 @@ public sealed class KeepAwakeService : IDisposable
             }
             var hadHold = _downloadLock.IsHeld;
             var sampleActive = overview?.Active == true && _autoEnabled;
-            var (hold, streak) = KeepAwakeDecider.Next(hadHold, _inactiveStreak, sampleActive);
+            var (hold, streak) = NextDownloadHold(hadHold, _inactiveStreak, sampleActive);
             _inactiveStreak = streak;
             if (hold && !hadHold)
             {
@@ -314,6 +317,26 @@ public sealed class KeepAwakeService : IDisposable
             Log.Info($"Steam downloads: {(active ? "active" : "inactive")} ({detail}).");
             DownloadActivityChanged?.Invoke(active);
         }
+    }
+
+    /// <summary>Pure hold/release policy for the automatic download wake lock: acquire on
+    /// the first active sample, release only after a run of consecutive inactive polls so
+    /// a brief gap between queued items (or one unreachable poll during a Steam client
+    /// restart) does not flap the hold.</summary>
+    /// <param name="currentHold">Whether the download hold is currently active.</param>
+    /// <param name="inactiveStreak">Consecutive inactive polls seen so far.</param>
+    /// <param name="sampleActive">Whether this poll saw an active transfer; an
+    /// unreachable poll counts as inactive.</param>
+    /// <returns>The desired hold state and the updated streak.</returns>
+    internal static (bool Hold, int InactiveStreak) NextDownloadHold(
+        bool currentHold, int inactiveStreak, bool sampleActive)
+    {
+        if (sampleActive)
+        {
+            return (true, 0);
+        }
+        var streak = Math.Min(inactiveStreak + 1, ReleaseAfterInactivePolls);
+        return (currentHold && streak < ReleaseAfterInactivePolls, streak);
     }
 
     /// <summary>Stops the poll loop and drops both holds.</summary>

@@ -11,7 +11,7 @@ namespace WSGM.Overlay;
 
 /// <summary>Renders a controller button glyph from the bundled Kenney CC0 SVGs.
 /// The SVGs are simple single/multi &lt;path fill d&gt; files, so they are parsed
-/// directly into Avalonia geometry — no SVG library, fully AOT-safe.
+/// directly into Avalonia geometry, avoiding a second SVG rendering dependency.
 /// Button names are by LABEL ("a" shows the style's A/Cross art); the confirm
 /// action always displays "a" — for Nintendo the INPUT mapping swaps instead
 /// (see GamepadNavigation), so the labeled-A button confirms in every style.</summary>

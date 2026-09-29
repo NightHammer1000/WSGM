@@ -3,9 +3,10 @@ using Microsoft.Win32;
 
 namespace WSGM.Core;
 
-/// <summary>Manages the per-user Winlogon Shell value. HKCU only — no admin rights
-/// needed, other accounts untouched. The pre-existing value (if any) is preserved in
-/// config and restored exactly on uninstall/panic.</summary>
+/// <summary>Restores the per-user Winlogon Shell value and owns the anti-Xbox-FSE
+/// StartupToGamingHome guard. HKCU only — no admin rights needed, other accounts
+/// untouched. WSGM never registers itself as the shell; <see cref="Uninstall"/> exists
+/// so recovery and the uninstaller can put back a snapshotted value exactly.</summary>
 public static class ShellRegistration
 {
     private const string WinlogonKey = @"Software\Microsoft\Windows NT\CurrentVersion\Winlogon";
@@ -51,30 +52,6 @@ public static class ShellRegistration
             config.PreviousStartupToGamingHomeValueKind = state.Kind;
         });
 
-    /// <summary>The registered command always prefers the INSTALLED copy (stable
-    /// path) over wherever the current process happens to run from. ProcessPath can
-    /// be null in exotic hosts — fall back to the base directory rather than
-    /// registering a broken '"" --shell' value.</summary>
-    public static string OwnShellCommand
-    {
-        get
-        {
-            // Inno is the only installer, so the installed path is the only path.
-            var exe = Installer.InstalledExePath;
-            return $"\"{exe}\" --shell";
-        }
-    }
-
-    /// <summary>Gets the current account-level Windows shell command, if one is set.</summary>
-    public static string? CurrentValue()
-    {
-        using var key = Registry.CurrentUser.OpenSubKey(WinlogonKey);
-        return ShellSnapshot.ReadCurrent(key).Value;
-    }
-
-    /// <summary>Gets whether the current account's shell command points at this executable.</summary>
-    public static bool IsInstalledForThisExe() => IsOwnedByThisExe(CurrentValue());
-
     /// <summary>Applies the anti-Xbox-FSE guard on its own: with explorer as the
     /// registered shell again, StartupToGamingHome=1 would boot the Xbox Full
     /// Screen Experience over WSGM's cover at sign-in. Captures the pre-existing
@@ -115,42 +92,6 @@ public static class ShellRegistration
         {
             Log.Warn($"StartupToGamingHome guard failed: {ex.Message}");
         }
-    }
-
-    /// <summary>LEGACY — registers WSGM as this user's shell. No current flow calls
-    /// this (WSGM boots via the logon service over an explorer shell); it is kept
-    /// only so old shell-registered installs remain restorable and the migration
-    /// tests keep their reference behavior. Saves any pre-existing custom Shell
-    /// value into config first so uninstall can restore it exactly.</summary>
-    public static void Install(AppConfig config)
-    {
-        using var shell = Registry.CurrentUser.CreateSubKey(WinlogonKey);
-        var existingShell = ShellSnapshot.ReadCurrent(shell);
-        var installingOverOurShell = IsOwnedByThisExe(existingShell.Value);
-
-        // Never overwrite the original snapshots during an idempotent install.
-        // Persist them before changing either registry value: if saving fails, the
-        // old shell is still intact and recovery remains possible.
-        if (!installingOverOurShell)
-        {
-            ShellSnapshot.Capture(config, existingShell);
-
-            // Read-only snapshot — OpenSubKey so a pure read can't materialize the key.
-            using var gamingSnapshot = Registry.CurrentUser.OpenSubKey(GamingConfigKey);
-            GamingHomeSnapshot.Capture(config, GamingHomeSnapshot.ReadCurrent(gamingSnapshot));
-        }
-
-        ConfigStore.Save(config);
-
-        shell.SetValue(ShellValue, OwnShellCommand, RegistryValueKind.String);
-
-        // Prevent Xbox FSE from fighting us at boot.
-        using (var gaming = Registry.CurrentUser.CreateSubKey(GamingConfigKey))
-        {
-            gaming.SetValue(StartupToGamingHome, 0, RegistryValueKind.DWord);
-        }
-
-        Log.Info($"Installed as shell: {OwnShellCommand} (previous: {DisplayShellSnapshot(config)})");
     }
 
     /// <summary>Restores the previous shell registration (delete our value, or write back

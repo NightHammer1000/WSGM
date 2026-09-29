@@ -40,4 +40,18 @@ public sealed class BootTakeoverCancellationTests
         Assert.True(takeover.DesktopRequested);
         Assert.True(takeover.Token.IsCancellationRequested);
     }
+
+    [Fact]
+    public void RequestShutdown_CancelsWithoutStartingTheSplashDesktopPath()
+    {
+        using var takeover = new BootTakeoverCancellation();
+        takeover.RequestDesktop();
+
+        bool accepted = takeover.RequestShutdown();
+
+        Assert.True(accepted);
+        Assert.True(takeover.ShutdownRequested);
+        Assert.False(takeover.DesktopRequested);
+        Assert.True(takeover.Token.IsCancellationRequested);
+    }
 }

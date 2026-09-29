@@ -1,0 +1,28 @@
+# Project-scoped Codex configuration. Codex loads this only for a TRUSTED project directory; if the
+# server never appears, trust the directory rather than debugging the config.
+#
+# Attaches Chrome DevTools MCP to Steam's CEF instead of launching a browser. The port is the same
+# loopback CDP endpoint WSGM itself drives, opened by Steam's `.cef-enable-remote-debugging` flag —
+# see docs\steam-cef.md for the accepted security posture, and never remove that flag.
+#
+# Steam's targets are addressed by title: SharedJSContext owns the webpack module registry, the
+# stores and the WSGM bridge, while Big-Picture-Modus owns the DOM and has no webpack global at all.
+# `list_pages` then `select_page` before evaluating, or the answer comes from the wrong context.
+#
+# `close_page` will close a real Steam window. Do not point it at Big-Picture-Modus.
+
+[mcp_servers.steam-cef]
+command = "cmd"
+args = [
+  "/c",
+  "npx",
+  "-y",
+  "chrome-devtools-mcp@1.8.0",
+  "--browserUrl",
+  "http://127.0.0.1:8080",
+  "--usageStatistics",
+  "false",
+  "--performanceCrux",
+  "false",
+]
+startup_timeout_sec = 60

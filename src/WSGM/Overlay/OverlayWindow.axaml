@@ -8,39 +8,164 @@
         x:Class="WSGM.Overlay.OverlayWindow"
         x:DataType="ov:OverlayViewModel"
         Title="WSGM Quick Access"
-        Width="360"
-        MinWidth="320"
+        Width="1280"
+        Height="650"
         WindowDecorations="None"
         CanResize="False"
         Topmost="True"
         ShowInTaskbar="False"
         Background="{StaticResource HcBackgroundBrush}">
 
-    <!-- Approved quick-access redesign: slim header, bumper TabStrip
-         (Session / Tools / Power, LB/RB cycle with wrap), three always-alive
-         per-tab panels toggled by IsVisible, CardButton rows, glyph footer.
-         No CornerRadius/Background here: the window surface behind it is opaque
-         and identically colored, so rounded corners could never render.
-         RootScale: renders the panel at the desktop's DPI — game mode forces
-         100% scaling, which shrinks DIP-sized UI on dense handheld panels
-         (see DockToRightEdge / DisplayScale.GetUiScalePercent). -->
+    <!-- The quick access SHEET: one top-edge surface that replaced the right-side
+         panel and the bottom taskbar. It covers SheetHeightFraction of the display
+         (DockToTopEdge) and leaves the game visible below it — that strip is the
+         tap-outside dismiss target. Rows, top to bottom: header with the status
+         pills (tray · eject · audio · Wi-Fi · Bluetooth · battery · clock), the
+         bumper destination strip (Quick access / Session / Steam / optional
+         Device / Tools / Power, LB/RB cycle with wrap), the always-alive
+         destination roots with their bounded nested pages, the Open apps chip
+         strip, the glyph footer.
+         No CornerRadius/Background on the sheet border: the window surface behind
+         it is opaque and identically coloured, so rounded corners could never
+         render. RootScale renders at the desktop's DPI — game mode forces 100 %
+         scaling, which shrinks DIP-sized UI on dense handheld panels. -->
     <LayoutTransformControl x:Name="RootScale">
     <Border>
-        <Grid RowDefinitions="Auto,Auto,*,Auto">
-            <Border Grid.Row="0" Background="{StaticResource HcHeaderBrush}" BorderBrush="{StaticResource HcCardBorderBrush}" BorderThickness="0,0,0,1" Padding="10,6">
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                    <StackPanel Orientation="Horizontal" Spacing="9">
-                        <TextBlock Text="WSGM" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
-                        <TextBlock Text="QUICK ACCESS" Classes="eyebrow" VerticalAlignment="Center" />
+        <Grid RowDefinitions="Auto,Auto,*,Auto,Auto">
+            <!-- Header: wordmark + active destination eyebrow, status pills right.
+                 The pill zone is bounded by budgeting the TRAY only (its count is
+                 not WSGM's to control); the fixed pills after it always keep their
+                 space and stay hittable. MaxWidth comes from the code-behind
+                 (ComputeTrayMaxWidth) because it depends on the display width and
+                 the RootScale touch factor. -->
+            <Border Grid.Row="0" x:Name="Header" Background="{StaticResource HcHeaderBrush}" BorderBrush="{StaticResource HcCardBorderBrush}" BorderThickness="0,0,0,1" Padding="24,0" Height="52">
+                <Grid ColumnDefinitions="Auto,*,Auto">
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <TextBlock Text="WSGM" FontSize="15" FontWeight="Bold" VerticalAlignment="Center" />
+                        <TextBlock x:Name="TabEyebrow" Text="QUICK ACCESS" Classes="eyebrow" VerticalAlignment="Center" />
                     </StackPanel>
-                    <Button Grid.Column="1" Classes="icon close" Content="×" Click="OnClose" ToolTip.Tip="Close quick access" />
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                        <!-- Tray area (populated by the Shell_TrayWnd host in game
+                             mode; collapses when empty). Tiles keep a fixed size at
+                             every count — reconcile-in-place must never move
+                             geometry under the focused button. -->
+                        <ScrollViewer x:Name="TrayScroller"
+                                      x:DataType="ov:AppSwitcherViewModel"
+                                      HorizontalScrollBarVisibility="Hidden"
+                                      VerticalScrollBarVisibility="Disabled"
+                                      AllowAutoHide="True"
+                                      VerticalAlignment="Center"
+                                      IsVisible="{Binding HasTrayIcons}">
+                            <ItemsControl ItemsSource="{Binding TrayIcons}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" Spacing="2" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="ov:TrayIconEntry">
+                                        <Button Classes="pill tray"
+                                                Click="OnTrayClick"
+                                                PointerReleased="OnTrayPointerReleased"
+                                                AutomationProperties.Name="{Binding Tip}"
+                                                ToolTip.Tip="{Binding Tip}">
+                                            <Image Source="{Binding Image}" Width="18" Height="18" />
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <Border Width="1" Height="24"
+                                Background="{StaticResource HcCardBorderBrush}"
+                                Margin="4,0"
+                                IsVisible="{Binding #TrayScroller.IsVisible}" />
+                        <StackPanel x:Name="StatusZone"
+                                    x:DataType="sh:SystemStatus"
+                                    Orientation="Horizontal"
+                                    Spacing="4"
+                                    VerticalAlignment="Center">
+                            <!-- Only present while something ejectable exists — the
+                                 same rule as Explorer's Safely Remove Hardware icon. -->
+                            <Button x:Name="EjectButton"
+                                    Classes="pill"
+                                    AutomationProperties.Name="Safely remove hardware"
+                                    ToolTip.Tip="Safely remove hardware"
+                                    IsVisible="{Binding Drives.HasDrives}"
+                                    Click="OnEjectTileClicked">
+                                <Path Classes="status-icon" Data="{x:Static c:Icons.Eject}" Width="16" Stretch="Uniform" VerticalAlignment="Center" HorizontalAlignment="Center" />
+                            </Button>
+                            <Button x:Name="AudioButton"
+                                    Classes="pill"
+                                    AutomationProperties.Name="Audio settings"
+                                    ToolTip.Tip="{Binding Audio.VolumeText}"
+                                    Click="OnAudioTileClicked">
+                                <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                                    <Path Classes="status-icon" Data="{x:Static c:Icons.Volume}" Width="18" Stretch="Uniform" VerticalAlignment="Center" />
+                                    <TextBlock Text="{Binding Audio.VolumeText}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="WifiButton"
+                                    Classes="pill"
+                                    AutomationProperties.Name="Wi-Fi settings"
+                                    ToolTip.Tip="Wi-Fi"
+                                    Click="OnRadioTileClicked"
+                                    Tag="wifi">
+                                <!-- Drawn, not a static path: the pill distinguishes
+                                     off / disconnected / connected and shows signal
+                                     strength, which one glyph cannot express. -->
+                                <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                                    <c:RadioIcon Width="18" Height="18"
+                                                 State="{Binding Radios.WifiIconState}"
+                                                 Signal="{Binding Radios.WifiSignal}"
+                                                 Accent="{DynamicResource HcAccentBrush}"
+                                                 Muted="{StaticResource HcTextPrimaryBrush}"
+                                                 VerticalAlignment="Center" />
+                                    <TextBlock Text="{Binding Radios.ConnectedSsid}"
+                                               FontSize="12"
+                                               FontWeight="SemiBold"
+                                               MaxWidth="90"
+                                               TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Center"
+                                               IsVisible="{Binding Radios.WifiConnected}" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="BluetoothButton"
+                                    Classes="pill"
+                                    AutomationProperties.Name="Bluetooth settings"
+                                    ToolTip.Tip="Bluetooth"
+                                    Click="OnRadioTileClicked"
+                                    Tag="bluetooth">
+                                <c:RadioIcon Width="18" Height="18"
+                                             Bluetooth="True"
+                                             State="{Binding Radios.BluetoothIconState}"
+                                             Accent="{DynamicResource HcAccentBrush}"
+                                             Muted="{StaticResource HcTextPrimaryBrush}"
+                                             VerticalAlignment="Center"
+                                             HorizontalAlignment="Center" />
+                            </Button>
+                            <Border Classes="pill-static" IsVisible="{Binding HasBattery}">
+                                <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                                    <!-- Width only, no Height: Avalonia aligns a Uniform
+                                         geometry top-left in its box, so a square box
+                                         around the wide battery glyph rides it high. -->
+                                    <Path Classes="status-icon" Data="{x:Static c:Icons.Battery}" Width="18" Stretch="Uniform" VerticalAlignment="Center" />
+                                    <TextBlock Text="{Binding BatteryText}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Border>
+                            <Border Classes="pill-static">
+                                <TextBlock Text="{Binding ClockText}" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            </Border>
+                        </StackPanel>
+                        <Button x:Name="CloseButton" Classes="pill close" Content="×" Click="OnClose"
+                                AutomationProperties.Name="Close quick access" ToolTip.Tip="Close quick access" Margin="4,0,0,0" />
+                    </StackPanel>
                 </Grid>
             </Border>
 
             <!-- Tab descriptors (labels + Icons geometries) are assigned in
                  code-behind; LB/RB cycle via GamepadNavigation. -->
-            <Border Grid.Row="1" Background="{StaticResource HcBackgroundBrush}" BorderBrush="{StaticResource HcCardBorderBrush}" BorderThickness="0,0,0,1">
-                <c:TabStrip x:Name="Tabs" />
+            <Border Grid.Row="1" Background="{StaticResource HcBackgroundBrush}" BorderBrush="{StaticResource HcCardBorderBrush}" BorderThickness="0,0,0,1" Padding="16,0">
+                <c:TabStrip x:Name="Tabs" Classes="sheet" />
             </Border>
 
             <!-- Directional Focus() does not request scrolling itself. Keep the
@@ -50,108 +175,130 @@
                           x:Name="ContentScroller"
                           VerticalScrollBarVisibility="Auto"
                           GotFocus="OnContentGotFocus">
-                <StackPanel Margin="8,8" Spacing="4">
-                    <!-- Panel-level warning: sits above the tab panels, so it is
-                         visible on every tab. -->
+                <StackPanel Margin="24,12" Spacing="6">
+                    <!-- Panel-level warning: sits above the destination roots, so it
+                         is visible on every one. -->
                     <fa:FAInfoBar IsOpen="{Binding HasWarning}" Title="WSGM" Message="{Binding WarningText}" Severity="Warning" IsClosable="False" Margin="0,0,0,4" />
 
-                    <StackPanel x:Name="PanelSession" Spacing="4" IsVisible="True">
+                    <!-- Quick access root: the rows the user pinned (X on any row in
+                         any other destination). Cards are built in code — mirrors of
+                         the XAML rows that follow their live title/description/badge,
+                         and device rows re-rendered from the current snapshot. -->
+                    <!-- The ghost "Pin an option" tile is appended by RenderPins as the
+                         grid's permanent last cell (mock: empty-slot affordance). -->
+                    <StackPanel x:Name="PanelQuickAccess" Spacing="8" IsVisible="True">
+                        <UniformGrid x:Name="PinnedGrid" Columns="4" />
+                    </StackPanel>
+
+                    <!-- Session (the Home destination). -->
+                    <UniformGrid x:Name="PanelHome" Columns="2" IsVisible="False">
                         <c:CardButton x:Name="HomeAppButton" Classes="primary" Click="OnHomeApp"
+                                      Tag="home.steam"
+                                      Margin="0,0,10,8"
                                       IconGeometry="{x:Static c:Icons.Play}"
                                       Title="{Binding HomeAppButtonText}"
                                       Description="Open Steam Big Picture"
                                       TrailingText="A" />
                         <c:CardButton x:Name="DesktopButton" Click="OnDesktop"
+                                      Tag="home.desktop"
+                                      Margin="0,0,0,8"
                                       IconGeometry="{x:Static c:Icons.Monitor}"
                                       Title="{Binding DesktopButtonText}"
                                       Description="Show or hide the Windows desktop"
                                       IsVisible="{Binding ModeSwitchAvailable}" />
                         <c:CardButton x:Name="ExitBigPictureButton" Click="OnExitBigPicture"
+                                      Tag="home.exit-big-picture"
+                                      Margin="0,0,10,8"
                                       IconGeometry="{x:Static c:Icons.ExitFullscreen}"
                                       Title="Exit Big Picture"
                                       Description="Switch Steam to its desktop window" />
                         <c:CardButton x:Name="CloseLauncherButton" Click="OnCloseLauncher"
+                                      Tag="home.close-steam"
+                                      Margin="0,0,0,8"
                                       IsVisible="{Binding HomeAppAlive}"
                                       IconGeometry="{x:Static c:Icons.Close}"
                                       Title="{Binding CloseLauncherText}"
                                       Description="Quit Steam completely" />
-                    </StackPanel>
+                    </UniformGrid>
 
-                    <!-- Grouped into sections (eyebrow labels, matching the sub-views'
-                         SectionLabel styling) so the list reads as System / Steam
-                         Library / Per-game Launch Fixes instead of one flat pile. -->
-                    <StackPanel x:Name="PanelTools" Spacing="4" IsVisible="False">
-                        <TextBlock Text="SYSTEM" Classes="eyebrow" Margin="2,0,2,2" />
-                        <c:CardButton Click="OnSettings"
-                                      IconGeometry="{x:Static c:Icons.Gear}"
-                                      Title="Settings"
-                                      Description="Shell, startup, and quick access configuration" />
-                        <c:CardButton Click="OnTaskManager"
-                                      IconGeometry="{x:Static c:Icons.Grid4}"
-                                      Title="Task Manager"
-                                      Description="Processes and performance" />
-
-                        <TextBlock Text="STEAM LIBRARY" Classes="eyebrow" Margin="2,6,2,2"
-                                   IsVisible="{Binding ShowSteamLibrarySection}" />
-                        <c:CardButton Click="OnLibraryTabs"
-                                      IsVisible="{Binding ShowLibraryTabs}"
-                                      IconGeometry="{x:Static c:Icons.SteamLike}"
-                                      Title="Library Tabs"
-                                      Description="Custom filter tabs and genres" />
-                        <c:CardButton Click="OnCardManager"
-                                      IsVisible="{Binding ShowCardManager}"
-                                      IconGeometry="{x:Static c:Icons.SdCard}"
-                                      Title="Card Manager"
-                                      Description="Rename, hide, and view SD-card libraries" />
-                        <c:CardButton Click="OnChangeArtwork"
-                                      IsVisible="{Binding ShowArtwork}"
-                                      IconGeometry="{x:Static c:Icons.Palette}"
-                                      Title="Change Artwork"
-                                      Description="Swap game art from SteamGridDB" />
-                        <c:CardButton Click="OnAddLibrary"
-                                      IsVisible="{Binding ShowSdCard}"
-                                      IconGeometry="{x:Static c:Icons.FolderPlus}"
-                                      Title="Add Steam Library"
-                                      Description="Register a folder, drive, or network share" />
-                        <!-- Formatting normally lives inside the Card Manager; this
-                             entry only returns when that manager is switched off, so
-                             the SD-format toggle can never be on with no way in. -->
-                        <c:CardButton Click="OnFormatSdCard"
-                                      IsVisible="{Binding ShowFormatInTools}"
-                                      IconGeometry="{x:Static c:Icons.SdCard}"
-                                      Title="Format SD Card"
-                                      Description="Erase a card as a Steam game library" />
-
-                        <TextBlock Text="PER-GAME LAUNCH FIXES" Classes="eyebrow" Margin="2,6,2,2" />
-                        <!-- The x:Name lives on the button: the handlers rewrite its
-                             Title with the result. Titles and descriptions are set
-                             once in the constructor (they differ for the CEF and
-                             clipboard paths) and must NOT be bound, or a binding
-                             re-evaluation would wipe the result text. -->
-                        <c:CardButton x:Name="DeelevateFixButton" Click="OnApplyDeelevation"
-                                      IconGeometry="{x:Static c:Icons.ArrowDown}" />
-                        <c:CardButton x:Name="InputLeaseFixButton" Click="OnApplySteamInputBlock"
-                                      IconGeometry="{x:Static c:Icons.BlockedCircle}" />
-                        <c:CardButton x:Name="BothFixesButton" Click="OnApplyBothWrappers"
-                                      IconGeometry="{x:Static c:Icons.Rocket}" />
-                        <c:CardButton x:Name="CustomLaunchButton" Click="OnPickCustomLaunchAction"
-                                      IsVisible="{Binding ConfigureLaunchOptionsLive}"
-                                      IconGeometry="{x:Static c:Icons.FolderPlus}"
-                                      Title="Replace launch action"
-                                      Description="Run an EXE, CMD, BAT, or PowerShell script" />
-                        <c:CardButton x:Name="RemoveFixesButton" Click="OnRemoveLaunchWrappers"
-                                      IsVisible="{Binding ShowRemoveLaunchWrapper}"
-                                      IconGeometry="{x:Static c:Icons.Close}"
-                                      Title="Restore original launch action"
-                                      Description="Remove WSGM changes and restore the original" />
-                    </StackPanel>
+                    <!-- Steam: library tools left, per-game launch fixes right. -->
+                    <Grid x:Name="PanelSteam" ColumnDefinitions="*,*" ColumnSpacing="20" IsVisible="False">
+                        <StackPanel Grid.Column="0" Spacing="4">
+                            <TextBlock Text="STEAM LIBRARY" Classes="eyebrow" Margin="2,0,2,2" />
+                            <TextBlock Text="Steam integration is turned off in Settings."
+                                       Classes="caption"
+                                       IsVisible="{Binding !ShowSteamLibrarySection}" />
+                            <c:CardButton Click="OnLibraryTabs"
+                                          Tag="steam.library-tabs"
+                                          IsVisible="{Binding ShowLibraryTabs}"
+                                          IconGeometry="{x:Static c:Icons.SteamLike}"
+                                          Title="Library Tabs"
+                                          Description="Custom filter tabs and genres" />
+                            <c:CardButton Click="OnCardManager"
+                                          Tag="steam.card-manager"
+                                          IsVisible="{Binding ShowCardManager}"
+                                          IconGeometry="{x:Static c:Icons.SdCard}"
+                                          Title="Card Manager"
+                                          Description="Rename, hide, and view SD-card libraries" />
+                            <c:CardButton Click="OnChangeArtwork"
+                                          Tag="steam.artwork"
+                                          IsVisible="{Binding ShowArtwork}"
+                                          IconGeometry="{x:Static c:Icons.Palette}"
+                                          Title="Change Artwork"
+                                          Description="Swap game art from SteamGridDB" />
+                            <c:CardButton Click="OnAddLibrary"
+                                          Tag="steam.add-library"
+                                          IsVisible="{Binding ShowSdCard}"
+                                          IconGeometry="{x:Static c:Icons.FolderPlus}"
+                                          Title="Add Steam Library"
+                                          Description="Register a folder, drive, or network share" />
+                            <!-- Formatting normally lives inside the Card Manager; this
+                                 entry only returns when that manager is switched off, so
+                                 the SD-format toggle can never be on with no way in. -->
+                            <c:CardButton Click="OnFormatSdCard"
+                                          Tag="steam.format-card"
+                                          IsVisible="{Binding ShowFormatInTools}"
+                                          IconGeometry="{x:Static c:Icons.SdCard}"
+                                          Title="Format SD Card"
+                                          Description="Erase a card as a Steam game library" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4">
+                            <TextBlock Text="PER-GAME LAUNCH FIXES" Classes="eyebrow" Margin="2,0,2,2" />
+                            <!-- The x:Name lives on the button: the handlers rewrite its
+                                 Title with the result. Titles and descriptions are set
+                                 once in the constructor (they differ for the CEF and
+                                 clipboard paths) and must NOT be bound, or a binding
+                                 re-evaluation would wipe the result text. -->
+                            <c:CardButton x:Name="DeelevateFixButton" Click="OnApplyDeelevation"
+                                          Tag="steam.launch.deelevate"
+                                          IconGeometry="{x:Static c:Icons.ArrowDown}" />
+                            <c:CardButton x:Name="InputLeaseFixButton" Click="OnApplySteamInputBlock"
+                                          Tag="steam.launch.input-lease"
+                                          IconGeometry="{x:Static c:Icons.BlockedCircle}" />
+                            <c:CardButton x:Name="BothFixesButton" Click="OnApplyBothWrappers"
+                                          Tag="steam.launch.both"
+                                          IconGeometry="{x:Static c:Icons.Rocket}" />
+                            <c:CardButton x:Name="CustomLaunchButton" Click="OnPickCustomLaunchAction"
+                                          Tag="steam.launch.custom"
+                                          IsVisible="{Binding ConfigureLaunchOptionsLive}"
+                                          IconGeometry="{x:Static c:Icons.FolderPlus}"
+                                          Title="Replace launch action"
+                                          Description="Run an EXE, CMD, BAT, or PowerShell script" />
+                            <c:CardButton x:Name="RemoveFixesButton" Click="OnRemoveLaunchWrappers"
+                                          Tag="steam.launch.restore"
+                                          IsVisible="{Binding ShowRemoveLaunchWrapper}"
+                                          IconGeometry="{x:Static c:Icons.Close}"
+                                          Title="Restore original launch action"
+                                          Description="Remove WSGM changes and restore the original" />
+                        </StackPanel>
+                    </Grid>
 
                     <!-- Format flow lives in-place (a Popup/Flyout would be
                          unreachable by the controller — GamepadNavigation is
                          scoped to this window). Three states toggle by
                          visibility: pick a drive, confirm the erase, watch it
                          run. The whole sub-view is hidden from the tab strip. -->
-                    <StackPanel x:Name="PanelFormat" x:DataType="sh:SdFormatManager" Spacing="6" IsVisible="False">
+                    <StackPanel x:Name="PanelFormat" x:DataType="sh:SdFormatManager" Spacing="6" IsVisible="False" MaxWidth="720" HorizontalAlignment="Left">
                         <TextBlock x:Name="FormatHeading"
                                    Text="Format SD Card"
                                    FontSize="15"
@@ -232,89 +379,234 @@
                         </StackPanel>
                     </StackPanel>
 
-                    <!-- Custom-tab builder sub-view. Self-drawing gamepad UI (see
-                         LibraryTabsView); hidden from the tab strip like PanelFormat,
-                         with the same LB/RB-suppress + B-cancels wiring. -->
-                    <ov:LibraryTabsView x:Name="LibraryTabsHost" IsVisible="False" />
+                    <!-- Self-drawing gamepad nested pages (see OverlaySubView); hidden
+                         from the tab strip like PanelFormat, with the same
+                         LB/RB-suppress + B-cancels wiring. Width-capped: they were
+                         designed as single columns and read badly stretched across
+                         the whole sheet. -->
+                    <ov:LibraryTabsView x:Name="LibraryTabsHost" IsVisible="False" MaxWidth="720" HorizontalAlignment="Left" />
+                    <ov:CardManagerView x:Name="CardManagerHost" IsVisible="False" MaxWidth="720" HorizontalAlignment="Left" />
+                    <ov:ArtworkView x:Name="ArtworkHost" IsVisible="False" MaxWidth="720" HorizontalAlignment="Left" />
+                    <ov:LaunchWrapperView x:Name="LaunchWrapperHost" IsVisible="False" MaxWidth="720" HorizontalAlignment="Left" />
+                    <ov:WakeLockHoldersView x:Name="WakeLockHost" IsVisible="False" MaxWidth="720" HorizontalAlignment="Left" />
 
-                    <!-- SD-card library manager sub-view (self-drawing gamepad UI). -->
-                    <ov:CardManagerView x:Name="CardManagerHost" IsVisible="False" />
+                    <!-- Device RGB editor. It stages changes and commits once so persistent
+                         firmware lighting is never written continuously while navigating. -->
+                    <ov:DeviceColorView x:Name="DeviceColorHost" IsVisible="False" MaxWidth="720" HorizontalAlignment="Left" />
 
-                    <!-- SteamGridDB artwork picker sub-view (self-drawing gamepad UI). -->
-                    <ov:ArtworkView x:Name="ArtworkHost" IsVisible="False" />
-
-                    <!-- Game picker for the launch fixes, shown only when the panel
-                         could not tell which game the user is looking at. -->
-                    <ov:LaunchWrapperView x:Name="LaunchWrapperHost" IsVisible="False" />
-
-                    <!-- Power-tab sub-view: everything currently holding a wake lock. -->
-                    <ov:WakeLockHoldersView x:Name="WakeLockHost" IsVisible="False" />
-
-                    <StackPanel x:Name="PanelPower" Spacing="4" IsVisible="False">
-                        <c:CardButton x:Name="KeepAwakeButton" Click="OnKeepAwakeToggle"
-                                      IsVisible="{Binding ShowKeepAwake}"
-                                      IconGeometry="{x:Static c:Icons.Mug}"
-                                      Title="Keep Awake"
-                                      Description="{Binding KeepAwakeDescription}"
-                                      TrailingText="{Binding KeepAwakeTrailing}" />
-                        <c:CardButton Click="OnShowWakeLockHolders"
-                                      IconGeometry="{x:Static c:Icons.ListLines}"
-                                      Title="What's keeping this awake"
-                                      Description="List the programs holding a wake lock" />
-
-                        <!-- Each row cycles its timeout through the presets; the
-                             trailing badge is the current value read live from the
-                             active power scheme. -->
-                        <TextBlock Text="IDLE TIMEOUTS" Classes="eyebrow" Margin="2,6,2,2" />
-                        <c:CardButton Click="OnCycleDisplayDc"
-                                      IconGeometry="{x:Static c:Icons.Monitor}"
-                                      Title="Screen off — battery"
-                                      Description="Idle time before the display turns off"
-                                      TrailingText="{Binding DisplayDcTimeout}" />
-                        <c:CardButton Click="OnCycleDisplayAc"
-                                      IconGeometry="{x:Static c:Icons.Monitor}"
-                                      Title="Screen off — plugged in"
-                                      Description="Idle time before the display turns off"
-                                      TrailingText="{Binding DisplayAcTimeout}" />
-                        <c:CardButton Click="OnCycleSleepDc"
-                                      IconGeometry="{x:Static c:Icons.Moon}"
-                                      Title="Standby — battery"
-                                      Description="Idle time before the device sleeps"
-                                      TrailingText="{Binding SleepDcTimeout}" />
-                        <c:CardButton Click="OnCycleSleepAc"
-                                      IconGeometry="{x:Static c:Icons.Moon}"
-                                      Title="Standby — plugged in"
-                                      Description="Idle time before the device sleeps"
-                                      TrailingText="{Binding SleepAcTimeout}" />
-                        <!-- Its own section: these end the session, they are not
-                             another idle timeout, and rendering them straight under
-                             the timeout rows read as one list. Ordered by how much
-                             they throw away — standby keeps the session in RAM,
-                             hibernate writes it to disk, restart and shut down end it.
-                             The two-step confirms rewrite Title ("Really?") from
-                             code-behind, same auto-revert as before. -->
-                        <TextBlock Text="POWER" Classes="eyebrow" Margin="2,10,2,2" />
-                        <c:CardButton Click="OnStandby"
-                                      IconGeometry="{x:Static c:Icons.Moon}"
-                                      Title="Standby"
-                                      Description="Suspend to RAM and resume where you left off" />
-                        <c:CardButton Click="OnHibernate"
-                                      IconGeometry="{x:Static c:Icons.Snowflake}"
-                                      Title="Hibernate"
-                                      Description="Save the session to disk and power off" />
-                        <c:CardButton x:Name="RestartButton" Click="OnRestart"
-                                      IconGeometry="{x:Static c:Icons.Restart}"
-                                      Title="Restart"
-                                      Description="Restart Windows" />
-                        <c:CardButton x:Name="ShutdownButton" Classes="danger" Click="OnShutdown"
-                                      IconGeometry="{x:Static c:Icons.Power}"
-                                      Title="Shut down"
-                                      Description="Turn off this handheld" />
+                    <!-- Device destination. Plugin rows come from the closed semantic descriptor
+                         vocabulary; WSGM-owned commands are separate view models. Packages cannot
+                         provide markup, styles, URLs, or arbitrary commands through this surface. -->
+                    <StackPanel x:Name="PanelDevice" Spacing="4" IsVisible="False">
+                        <TextBlock x:Name="DeviceStatusTitle"
+                                   Text="Device integration"
+                                   FontSize="16"
+                                   FontWeight="SemiBold"
+                                   Margin="2,0,2,0" />
+                        <TextBlock x:Name="DeviceStatusDetail"
+                                   Text="Waiting for coordinator state"
+                                   Classes="caption"
+                                   TextWrapping="Wrap"
+                                   Margin="2,0,2,6" />
+                        <TextBlock Text="DEVICE CONTROLS" Classes="eyebrow" Margin="2,2,2,2" />
+                        <StackPanel x:Name="DeviceCapabilityList" Spacing="4" />
                     </StackPanel>
+
+                    <!-- Tools (the System destination): what is left once Steam, Device
+                         and Power have their own destinations, as two columns. The LEFT
+                         column's children are indexed by PlacePerformanceSection — keep
+                         the order. -->
+                    <Grid x:Name="PanelSystem" ColumnDefinitions="*,*" ColumnSpacing="20" IsVisible="False">
+                        <StackPanel x:Name="SystemPrimaryColumn" Spacing="4">
+                            <TextBlock Text="SYSTEM" Classes="eyebrow" Margin="2,0,2,2" />
+                            <c:CardButton Click="OnSettings"
+                                          Tag="system.settings"
+                                          IconGeometry="{x:Static c:Icons.Gear}"
+                                          Title="Settings"
+                                          Description="Shell, startup, and quick access configuration" />
+                            <c:CardButton Click="OnTaskManager"
+                                          Tag="system.task-manager"
+                                          IconGeometry="{x:Static c:Icons.Grid4}"
+                                          Title="Task Manager"
+                                          Description="Processes and performance" />
+
+                            <!-- One shared performance projection is reparented into Device while
+                                 integration is visible and remains here otherwise. Its source owns
+                                 RTSS lifetime and state; this window only observes and invokes rows. -->
+                            <StackPanel x:Name="PerformanceSection" Spacing="4" IsVisible="False">
+                                <TextBlock Text="PERFORMANCE" Classes="eyebrow" Margin="2,6,2,2" />
+                                <TextBlock x:Name="PerformanceStatus"
+                                           Classes="caption"
+                                           TextWrapping="Wrap"
+                                           Margin="2,0,2,2" />
+                                <StackPanel x:Name="PerformanceRows" Spacing="4" />
+                            </StackPanel>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4">
+                            <TextBlock Text="STORAGE" Classes="eyebrow" Margin="2,0,2,2" />
+                            <c:CardButton Click="OnEjectTileClicked"
+                                          Tag="system.eject"
+                                          IconGeometry="{x:Static c:Icons.Eject}"
+                                          Title="Safely remove hardware"
+                                          Description="Eject an SD card or USB drive" />
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Power: wake, idle timeouts, and the session-ending actions as
+                         three columns. Each timeout row cycles its preset; the trailing
+                         badge is the current value read live from the active power
+                         scheme. The two-step confirms rewrite Title ("Really?") from
+                         code-behind, same auto-revert as before. -->
+                    <Grid x:Name="PanelPower" ColumnDefinitions="*,*,*" ColumnSpacing="20" IsVisible="False">
+                        <StackPanel Grid.Column="0" Spacing="4">
+                            <TextBlock Text="WAKE" Classes="eyebrow" Margin="2,0,2,2" />
+                            <c:CardButton x:Name="KeepAwakeButton" Click="OnKeepAwakeToggle"
+                                          Tag="system.keep-awake"
+                                          IsVisible="{Binding ShowKeepAwake}"
+                                          IconGeometry="{x:Static c:Icons.Mug}"
+                                          Title="Keep Awake"
+                                          Description="{Binding KeepAwakeDescription}"
+                                          TrailingText="{Binding KeepAwakeTrailing}" />
+                            <c:CardButton Click="OnShowWakeLockHolders"
+                                          Tag="system.wake-locks"
+                                          IconGeometry="{x:Static c:Icons.ListLines}"
+                                          Title="What's keeping this awake"
+                                          Description="List the programs holding a wake lock" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4">
+                            <TextBlock Text="IDLE TIMEOUTS" Classes="eyebrow" Margin="2,0,2,2" />
+                            <c:CardButton Click="OnCycleDisplayDc"
+                                          Tag="system.timeout.display-dc"
+                                          IconGeometry="{x:Static c:Icons.Monitor}"
+                                          Title="Screen off — battery"
+                                          Description="Idle time before the display turns off"
+                                          TrailingText="{Binding DisplayDcTimeout}" />
+                            <c:CardButton Click="OnCycleDisplayAc"
+                                          Tag="system.timeout.display-ac"
+                                          IconGeometry="{x:Static c:Icons.Monitor}"
+                                          Title="Screen off — plugged in"
+                                          Description="Idle time before the display turns off"
+                                          TrailingText="{Binding DisplayAcTimeout}" />
+                            <c:CardButton Click="OnCycleSleepDc"
+                                          Tag="system.timeout.sleep-dc"
+                                          IconGeometry="{x:Static c:Icons.Moon}"
+                                          Title="Standby — battery"
+                                          Description="Idle time before the device sleeps"
+                                          TrailingText="{Binding SleepDcTimeout}" />
+                            <c:CardButton Click="OnCycleSleepAc"
+                                          Tag="system.timeout.sleep-ac"
+                                          IconGeometry="{x:Static c:Icons.Moon}"
+                                          Title="Standby — plugged in"
+                                          Description="Idle time before the device sleeps"
+                                          TrailingText="{Binding SleepAcTimeout}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Spacing="4">
+                            <TextBlock Text="POWER" Classes="eyebrow" Margin="2,0,2,2" />
+                            <c:CardButton Click="OnStandby"
+                                          Tag="system.standby"
+                                          IconGeometry="{x:Static c:Icons.Moon}"
+                                          Title="Standby"
+                                          Description="Suspend to RAM and resume where you left off" />
+                            <c:CardButton Click="OnHibernate"
+                                          Tag="system.hibernate"
+                                          IconGeometry="{x:Static c:Icons.Snowflake}"
+                                          Title="Hibernate"
+                                          Description="Save the session to disk and power off" />
+                            <c:CardButton x:Name="RestartButton" Click="OnRestart"
+                                          Tag="system.restart"
+                                          IconGeometry="{x:Static c:Icons.Restart}"
+                                          Title="Restart"
+                                          Description="Restart Windows" />
+                            <c:CardButton x:Name="ShutdownButton" Classes="danger" Click="OnShutdown"
+                                          Tag="system.shutdown"
+                                          IconGeometry="{x:Static c:Icons.Power}"
+                                          Title="Shut down"
+                                          Description="Turn off this handheld" />
+                        </StackPanel>
+                    </Grid>
                 </StackPanel>
             </ScrollViewer>
 
-            <Border Grid.Row="3" Classes="hc-footer" Padding="8,5">
+            <!-- Pin feedback toast (mock: PinFlow): floats over the content just above
+                 the Open apps strip; hit-test transparent so it can never trap focus. -->
+            <Border x:Name="PinToast"
+                    Grid.Row="2"
+                    IsVisible="False"
+                    IsHitTestVisible="False"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Bottom"
+                    Margin="0,0,0,10"
+                    Height="40"
+                    Padding="16,0"
+                    CornerRadius="10"
+                    Background="{StaticResource HcCardHoverBrush}"
+                    BorderBrush="{StaticResource HcCardBorderBrush}"
+                    BorderThickness="1"
+                    BoxShadow="0 10 30 0 #73000000">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock x:Name="PinToastText" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <TextBlock x:Name="PinToastHint" Classes="caption" VerticalAlignment="Center" />
+                </StackPanel>
+            </Border>
+
+            <!-- Open apps: the former taskbar's tile strip as a chip row pinned to
+                 the sheet bottom. Chips keep a fixed height at every count and the
+                 strip scrolls sideways once they no longer fit; a chip keeps its
+                 place as windows open and close (reconcile-in-place). Controller
+                 focus is scrolled into view explicitly (OnStripGotFocus). -->
+            <Border Grid.Row="3" x:Name="AppsStrip" x:DataType="ov:AppSwitcherViewModel" BorderBrush="{StaticResource HcCardBorderBrush}" BorderThickness="0,1,0,0" Padding="24,8">
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
+                    <TextBlock Text="OPEN APPS" Classes="eyebrow" VerticalAlignment="Center" />
+                    <ScrollViewer Grid.Column="1"
+                                  x:Name="TileScroller"
+                                  HorizontalScrollBarVisibility="Hidden"
+                                  VerticalScrollBarVisibility="Disabled"
+                                  AllowAutoHide="True"
+                                  VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Left" VerticalAlignment="Center">
+                            <TextBlock Text="No open apps"
+                                       Classes="caption"
+                                       VerticalAlignment="Center"
+                                       Margin="4,0"
+                                       IsVisible="{Binding !HasEntries}" />
+                            <ItemsControl x:Name="AppTiles" ItemsSource="{Binding Entries}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" Spacing="10" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="ov:AppSwitcherEntry">
+                                        <Button Classes="app-chip"
+                                                Classes.active="{Binding IsActive}"
+                                                Classes.minimized="{Binding IsMinimized}"
+                                                Click="OnPickWindow"
+                                                ToolTip.Tip="{Binding Title}">
+                                            <Panel>
+                                                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                                    <Panel Width="18" Height="18" VerticalAlignment="Center">
+                                                        <Image Source="{Binding Icon}" Width="18" Height="18" />
+                                                        <!-- Fallback glyph when no icon could be resolved. -->
+                                                        <TextBlock Text="▢" FontSize="14" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding HasNoIcon}" />
+                                                    </Panel>
+                                                    <TextBlock Text="{Binding Title}" FontSize="13" FontWeight="SemiBold" MaxWidth="150" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                                </StackPanel>
+                                                <Border Classes="active-indicator" Height="3" CornerRadius="1.5" VerticalAlignment="Bottom" Margin="0,0,0,-4" />
+                                            </Panel>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center" IsVisible="{Binding HasEntries}">
+                        <ov:GlyphIcon Width="18" Height="18" Button="y" GlyphStyle="{Binding $parent[Window].((ov:OverlayViewModel)DataContext).GlyphStyle}" VerticalAlignment="Center" />
+                        <TextBlock Text="Next app" Classes="caption" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="4" Classes="hc-footer" Padding="24,5">
                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
                     <StackPanel Orientation="Horizontal" Spacing="17">
                         <StackPanel Orientation="Horizontal" Spacing="5">
@@ -325,10 +617,15 @@
                             <ov:GlyphIcon Width="18" Height="18" Button="b" GlyphStyle="{Binding GlyphStyle}" VerticalAlignment="Center" />
                             <TextBlock Text="Back" Classes="caption" VerticalAlignment="Center" />
                         </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <ov:GlyphIcon Width="18" Height="18" Button="x" GlyphStyle="{Binding GlyphStyle}" VerticalAlignment="Center" />
+                            <TextBlock Text="Pin to Quick access" Classes="caption" VerticalAlignment="Center" />
+                        </StackPanel>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="14">
                         <TextBlock Text="LB/RB  Tab" Classes="caption" VerticalAlignment="Center" />
                         <TextBlock Text="D-pad  Navigate" Classes="caption" VerticalAlignment="Center" />
+                        <TextBlock Text="Tap the game below to close" Classes="caption" VerticalAlignment="Center" />
                     </StackPanel>
                 </Grid>
             </Border>
@@ -337,18 +634,90 @@
     </LayoutTransformControl>
 
     <Window.Styles>
-        <!-- The local BorderBrush wins the equal-specificity tie against
-             Shared.axaml's Button:focus, so the accent focus border is restated
-             here (same workaround as TabStripTheme and the taskbar tiles) —
-             otherwise the header's only focus cue would be the text colour. -->
-        <Style Selector="Button.close">
+        <!-- Header status pills: compact rounded buttons. The local BorderBrush
+             wins the equal-specificity tie against Shared.axaml's Button:focus, so
+             the accent focus border is restated here (same workaround as
+             TabStripTheme) — otherwise a focused pill would have no cue. -->
+        <Style Selector="Button.pill">
+            <Setter Property="MinWidth" Value="34" />
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="Background" Value="{StaticResource HcCardBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource HcCardBorderBrush}" />
+            <Setter Property="BorderThickness" Value="2" />
+            <Setter Property="CornerRadius" Value="15" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Button.pill:focus">
+            <Setter Property="BorderBrush" Value="{DynamicResource HcAccentBrush}" />
+        </Style>
+        <Style Selector="Button.pill:pointerover">
+            <Setter Property="Background" Value="{StaticResource HcCardHoverBrush}" />
+        </Style>
+        <Style Selector="Button.pill.tray">
+            <Setter Property="MinWidth" Value="30" />
+            <Setter Property="Padding" Value="4,0" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
-            <Setter Property="Foreground" Value="{StaticResource HcTextMutedBrush}" />
         </Style>
-        <Style Selector="Button.close:focus">
+        <Style Selector="Button.pill.tray:focus">
             <Setter Property="BorderBrush" Value="{DynamicResource HcAccentBrush}" />
+        </Style>
+        <Style Selector="Button.pill.close">
+            <Setter Property="Foreground" Value="{StaticResource HcTextMutedBrush}" />
+            <Setter Property="FontSize" Value="16" />
+        </Style>
+        <Style Selector="Button.pill.close:focus">
             <Setter Property="Foreground" Value="{StaticResource HcTextPrimaryBrush}" />
+        </Style>
+        <!-- Read-only pills (battery, clock) share the shape without a focus stop. -->
+        <Style Selector="Border.pill-static">
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Padding" Value="10,0" />
+            <Setter Property="Background" Value="{StaticResource HcCardBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource HcCardBorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="15" />
+        </Style>
+        <!-- Stroke-rendered like the TabStrip icons: the Icons geometries are
+             stroke-style, filling them collapses interior detail. -->
+        <Style Selector="Path.status-icon">
+            <Setter Property="Fill" Value="{x:Null}" />
+            <Setter Property="Stroke" Value="{StaticResource HcTextMutedBrush}" />
+            <Setter Property="StrokeThickness" Value="1.5" />
+            <Setter Property="StrokeJoin" Value="Round" />
+            <Setter Property="StrokeLineCap" Value="Round" />
+        </Style>
+
+        <!-- Open apps chips: fixed 40 px height, card background, accent
+             underline when the window is foreground, dimmed when minimized. -->
+        <Style Selector="Button.app-chip">
+            <Setter Property="Height" Value="40" />
+            <Setter Property="Padding" Value="10,0,12,0" />
+            <Setter Property="Background" Value="{StaticResource HcCardBrush}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="2" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Button.app-chip:focus">
+            <Setter Property="BorderBrush" Value="{DynamicResource HcAccentBrush}" />
+        </Style>
+        <Style Selector="Button.app-chip:pointerover">
+            <Setter Property="Background" Value="{StaticResource HcCardHoverBrush}" />
+        </Style>
+        <Style Selector="Button.app-chip.minimized Image">
+            <Setter Property="Opacity" Value="0.5" />
+        </Style>
+        <Style Selector="Button.app-chip.minimized TextBlock">
+            <Setter Property="Opacity" Value="0.5" />
+        </Style>
+        <Style Selector="Button.app-chip Border.active-indicator">
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+        <Style Selector="Button.app-chip.active Border.active-indicator">
+            <Setter Property="Background" Value="{DynamicResource HcAccentBrush}" />
         </Style>
     </Window.Styles>
 </Window>

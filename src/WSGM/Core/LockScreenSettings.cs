@@ -89,7 +89,6 @@ public static class LockScreenSettings
                     // the pre-existing policy values, and whether the policy key
                     // existed at all (if not, restore removes the whole key).
                     config.PreviousLockOnWakeSnapshotCaptured = true;
-                    config.PreviousLockOnWakeRequired = !SignInOnWakeDisabled();
                     config.PreviousConsoleLockSchemeValues = CaptureSchemeValues();
                     using (var policy = Registry.LocalMachine.OpenSubKey(PolicyKey))
                     {
@@ -120,12 +119,10 @@ public static class LockScreenSettings
                 }
                 else
                 {
-                    // Legacy single-bool snapshot (older config) or no snapshot at
-                    // all: restore Windows' default (require sign-in) unless it was
-                    // already off before WSGM touched it.
-                    var restoreToRequired = !config.PreviousLockOnWakeSnapshotCaptured || config.PreviousLockOnWakeRequired;
-                    SetSchemeValue(restoreToRequired ? 1 : 0);
-                    Log.Info($"Sign-in on wake restored (CONSOLELOCK={(restoreToRequired ? 1 : 0)}).");
+                    // No snapshot (or an empty scheme capture): restore Windows'
+                    // default (require sign-in).
+                    SetSchemeValue(1);
+                    Log.Info("Sign-in on wake restored (CONSOLELOCK=1).");
                 }
                 RestoreNoLockScreen(config.PreviousNoLockScreen);
 
@@ -278,15 +275,7 @@ public static class LockScreenSettings
     /// (or the values deleted when they were absent).</summary>
     private static void RestorePolicyValues(AppConfig config)
     {
-        // Legacy edge: a snapshot written by an older release has
-        // SnapshotCaptured=true but never recorded PolicyKeyExisted, which
-        // deserializes to false — indistinguishable from "WSGM created the key".
-        // Those configs are recognizable by their empty per-scheme list; for them
-        // the old restore only deleted the two AC/DC values, so key-delete is
-        // reserved for NEW-format snapshots that explicitly recorded the key as
-        // WSGM-created. Legacy snapshots always take the value-delete path below.
-        var newFormatSnapshot = config.PreviousConsoleLockSchemeValues.Count > 0;
-        if (config.PreviousLockOnWakeSnapshotCaptured && newFormatSnapshot &&
+        if (config.PreviousLockOnWakeSnapshotCaptured &&
             !config.PreviousConsoleLockPolicyKeyExisted)
         {
             try

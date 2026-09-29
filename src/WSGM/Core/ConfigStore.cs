@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
+using WSGM.Device.Sdk.Capabilities;
+using WSGM.Device.Sdk.Settings;
 
 namespace WSGM.Core;
 
@@ -18,8 +21,8 @@ public static class ConfigStore
     // interleave. It CANNOT merge: saving an AppConfig loaded long ago overwrites
     // every field another process persisted in between, so long-lived holders must
     // re-load and re-apply only their own fields before saving (see
-    // SettingsViewModel.SaveMerged). The timeout is short and a miss only logs —
-    // recovery paths must never block here.
+    // SettingsViewModel.Save). Read-only startup may degrade after the short timeout; every
+    // write and read-modify-write transaction fails closed instead of risking a lost update.
     private const string MutexName = @"Local\WSGM.Config";
     private const int MutexTimeoutMs = 2000;
 
@@ -28,18 +31,10 @@ public static class ConfigStore
     /// <returns>A normalized configuration that callers can use without null checks.</returns>
     public static AppConfig Load()
     {
-        using var guard = ConfigMutex.Acquire();
+        using var guard = ConfigMutex.Acquire(requireExclusive: false);
         try
         {
-            if (File.Exists(ConfigPath))
-            {
-                var json = File.ReadAllText(ConfigPath);
-                var config = DeserializeConfig(json);
-                if (config is not null)
-                {
-                    return Normalize(config);
-                }
-            }
+            return LoadCurrentDocument();
         }
         catch (Exception ex)
         {
@@ -58,37 +53,45 @@ public static class ConfigStore
     /// <returns>The normalized configuration, or defaults only when no file exists.</returns>
     internal static AppConfig LoadForMutation()
     {
-        using var guard = ConfigMutex.Acquire();
+        using var guard = ConfigMutex.Acquire(requireExclusive: true);
+        return LoadCurrentDocument();
+    }
+
+    private static AppConfig LoadCurrentDocument()
+    {
         if (!File.Exists(ConfigPath))
         {
             return new AppConfig();
         }
         var json = File.ReadAllText(ConfigPath);
-        var config = DeserializeConfig(json)
-            ?? throw new InvalidDataException("Configuration JSON contained no object.");
+        var config = DeserializeConfig(json);
         return Normalize(config);
     }
 
-    private static AppConfig? DeserializeConfig(string json)
+    /// <summary>Deserializes one configuration document, repairing unknown enum names first.</summary>
+    /// <param name="json">The raw file contents.</param>
+    /// <returns>The configuration, before normalization.</returns>
+    /// <remarks>
+    /// Internal because the repair pass is the part worth testing: a value it fails to repair makes
+    /// the retry throw, and <see cref="Load"/> then sets the entire file aside.
+    /// </remarks>
+    internal static AppConfig DeserializeConfig(string json)
     {
         try
         {
-            return JsonSerializer.Deserialize(json, ConfigJsonContext.Default.AppConfig);
+            return JsonSerializer.Deserialize(json, ConfigJsonContext.Default.AppConfig)
+                ?? throw new JsonException("Configuration JSON contained null instead of an object.");
         }
         catch (JsonException)
         {
             var root = JsonNode.Parse(json)?.AsObject()
                 ?? throw new JsonException("Configuration root was not an object.");
-            RepairEnum(root, "GlyphStyle", GlyphStyle.Xbox);
-            RepairEnum(root, "DisplayManagement", DisplayManagementMode.DpiOnly);
-            if (root["Gestures"] is JsonObject gestures)
-            {
-                RepairEnum(gestures, "BottomEdgeAction", EdgeAction.Taskbar);
-            }
+            RepairEnum(root, "GlyphStyle", Defaults.GlyphStyle);
+            RepairEnum(root, "DisplayManagement", Defaults.DisplayManagement);
             if (root["Splash"] is JsonObject splash)
             {
-                RepairEnum(splash, "SpinnerStyle", SplashSpinnerStyle.Ring);
-                RepairEnum(splash, "SweepEdge", SweepEdge.Bottom);
+                RepairEnum(splash, "SpinnerStyle", Defaults.Splash.SpinnerStyle);
+                RepairEnum(splash, "SweepEdge", Defaults.Splash.SweepEdge);
                 RepairPlacement(splash["TextPlacement"] as JsonObject);
                 RepairPlacement(splash["SpinnerPlacement"] as JsonObject);
                 RepairPlacement(splash["LogoPlacement"] as JsonObject);
@@ -104,31 +107,150 @@ public static class ConfigStore
             {
                 foreach (var wrapper in wrappers.OfType<JsonObject>())
                 {
-                    RepairEnum(wrapper, "Mode", LaunchWrapperMode.None);
-                    RepairEnum(wrapper, "Kind", LaunchConfigurationKind.Wrapper);
+                    RepairEnum(wrapper, "Mode", default(LaunchWrapperMode));
+                    RepairEnum(wrapper, "Kind", default(LaunchConfigurationKind));
                 }
             }
-            return JsonSerializer.Deserialize(root.ToJsonString(), ConfigJsonContext.Default.AppConfig);
+            if (root["Performance"] is JsonObject performance)
+            {
+                RepairEnum(performance, "FrameLimitStrategy", Defaults.Performance.FrameLimitStrategy);
+            }
+            // Every enum in this file is written by name (UseStringEnumConverter), so an unknown
+            // name throws here before Normalize can apply its Enum.IsDefined fallbacks. Repairing
+            // only the older fields meant one mistyped or unrecognised device value — from a hand
+            // edit, or from a configuration written by a newer build — made the retry throw as
+            // well, and Load then moved the whole otherwise-valid file aside, taking the registry
+            // recovery snapshots and every unrelated setting with it.
+            if (root["DeviceIntegration"] is JsonObject device)
+            {
+                RepairEnum(device, "ControllerTarget", Defaults.DeviceIntegration.ControllerTarget);
+                RepairEnum(device, "GlyphSelection", Defaults.DeviceIntegration.GlyphSelection);
+                if (device["ControllerTargets"] is JsonArray targets)
+                {
+                    foreach (var target in targets.OfType<JsonObject>())
+                    {
+                        RepairEnum(target, "Target", Defaults.DeviceIntegration.ControllerTarget);
+                    }
+                }
+                if (device["Profiles"] is JsonArray profiles)
+                {
+                    foreach (var profile in profiles.OfType<JsonObject>())
+                    {
+                        RepairDeviceProfileJson(profile);
+                    }
+                }
+                if (device["PluginSettings"] is JsonArray settings)
+                {
+                    foreach (var scope in settings.OfType<JsonObject>())
+                    {
+                        RepairPluginSettingsDeclarationJson(scope["Declaration"] as JsonObject);
+                    }
+                }
+            }
+            return JsonSerializer.Deserialize(root.ToJsonString(), ConfigJsonContext.Default.AppConfig)
+                ?? throw new JsonException("Configuration JSON contained null instead of an object.");
+        }
+    }
+
+    /// <summary>
+    /// Repairs enum names in one cached plugin settings manifest so a declaration written by a
+    /// newer plugin can be discarded independently instead of quarantining the entire config.
+    /// </summary>
+    /// <param name="declaration">The cached declaration, or null when the scope has none.</param>
+    private static void RepairPluginSettingsDeclarationJson(JsonObject? declaration)
+    {
+        if (declaration is null)
+        {
+            return;
+        }
+
+        foreach (var section in (declaration["Sections"] as JsonArray ?? []).OfType<JsonObject>())
+        {
+            RepairEnum(section, "Key", SettingSectionKey.General);
+        }
+
+        foreach (var setting in (declaration["Settings"] as JsonArray ?? []).OfType<JsonObject>())
+        {
+            RepairEnum(setting, "ValueKind", CapabilityValueKind.None);
+            RepairEnum(setting, "Unit", CapabilityUnit.None);
+            if (setting["Display"] is JsonObject display)
+            {
+                RepairEnum(display, "Key", DisplayKey.Custom);
+            }
+            if (setting["Default"] is JsonObject defaultValue)
+            {
+                RepairEnum(defaultValue, "Kind", CapabilityValueKind.None);
+            }
+        }
+    }
+
+    /// <summary>Repairs the enum-bearing members of one persisted device profile.</summary>
+    /// <param name="profile">The stored profile object, straight from the file.</param>
+    private static void RepairDeviceProfileJson(JsonObject profile)
+    {
+        if (profile["OemAssignments"] is JsonArray assignments)
+        {
+            foreach (var assignment in assignments.OfType<JsonObject>())
+            {
+                RepairEnum(assignment, "Action", OemAction.Disabled);
+            }
+        }
+
+        if (profile["Capabilities"] is not JsonArray capabilities)
+        {
+            return;
+        }
+
+        foreach (var capability in capabilities.OfType<JsonObject>())
+        {
+            RepairCapabilityValueJson(capability["GlobalDefault"] as JsonObject);
+            RepairCapabilityValueJson(capability["AcPolicy"] as JsonObject);
+            RepairCapabilityValueJson(capability["DcPolicy"] as JsonObject);
+            foreach (var named in (capability["HardwareProfiles"] as JsonArray ?? [])
+                .OfType<JsonObject>())
+            {
+                RepairCapabilityValueJson(named["Value"] as JsonObject);
+            }
+            foreach (var application in (capability["ApplicationOverrides"] as JsonArray ?? [])
+                .OfType<JsonObject>())
+            {
+                RepairCapabilityValueJson(application["Value"] as JsonObject);
+            }
+        }
+    }
+
+    /// <summary>Repairs the value-kind discriminator of one stored capability value.</summary>
+    /// <param name="value">The stored value object, or null when the layer carries none.</param>
+    /// <remarks>
+    /// Repaired to <see cref="CapabilityValueKind.None"/> rather than guessing from the populated
+    /// field: a value whose kind cannot be read is not a value, and the desired-state resolver
+    /// treats it as absent instead of writing something arbitrary to hardware.
+    /// </remarks>
+    private static void RepairCapabilityValueJson(JsonObject? value)
+    {
+        if (value is not null)
+        {
+            RepairEnum(value, "Kind", CapabilityValueKind.None);
         }
     }
 
     private static void RepairPlacement(JsonObject? placement)
     {
         if (placement is null) { return; }
-        RepairEnum(placement, "Mode", SplashPlacementMode.Anchor);
-        RepairEnum(placement, "Anchor", SplashPlacementAnchor.Center);
+        RepairEnum(placement, "Mode", PlacementDefaults.Mode);
+        RepairEnum(placement, "Anchor", PlacementDefaults.Anchor);
     }
 
     private static void RepairFilterJson(JsonObject? filter)
     {
         if (filter is null) { return; }
-        RepairEnum(filter, "Kind", FilterKind.Installed);
-        RepairEnum(filter, "Mode", FilterMode.And);
-        RepairEnum(filter, "Condition", ThresholdCondition.Above);
-        RepairEnum(filter, "Platform", PlatformKind.Steam);
-        RepairEnum(filter, "ScoreType", ReviewScoreType.SteamPercent);
-        RepairEnum(filter, "Units", TimeUnit.Hours);
-        RepairEnum(filter, "CardScope", SdCardScope.Inserted);
+        RepairEnum(filter, "Kind", FilterDefaults.Kind);
+        RepairEnum(filter, "Mode", FilterDefaults.Mode);
+        RepairEnum(filter, "Condition", FilterDefaults.Condition);
+        RepairEnum(filter, "Platform", FilterDefaults.Platform);
+        RepairEnum(filter, "ScoreType", FilterDefaults.ScoreType);
+        RepairEnum(filter, "Units", FilterDefaults.Units);
+        RepairEnum(filter, "CardScope", FilterDefaults.CardScope);
         if (filter["Children"] is JsonArray children)
         {
             foreach (var child in children.OfType<JsonObject>())
@@ -149,22 +271,53 @@ public static class ConfigStore
         }
     }
 
+    // The single source for every persisted default is the config classes' own
+    // property initializers; these read-only templates hand them to the JSON
+    // repair pass (unknown enum NAME) and to Normalize (unknown enum NUMBER, null
+    // string) alike, so the two passes cannot drift apart. Never mutate them and
+    // never hand them to a caller.
+    private static readonly AppConfig Defaults = new();
+    private static readonly SplashElementPlacement PlacementDefaults = new();
+    // Spelled out rather than left to the property initializers: a repaired filter falls back to
+    // the neutral filter a user would recognise ("installed", ANDed, inserted cards), which is not
+    // the same as enum member zero. Both repair passes read this one instance, so they cannot
+    // disagree about what an unreadable value becomes.
+    private static readonly FilterNode FilterDefaults = new()
+    {
+        Kind = FilterKind.Installed,
+        Mode = FilterMode.And,
+        Condition = ThresholdCondition.Above,
+        Platform = PlatformKind.Steam,
+        ScoreType = ReviewScoreType.SteamPercent,
+        Units = TimeUnit.Hours,
+        CardScope = SdCardScope.Inserted,
+    };
+
+    /// <summary>An unknown enum NUMBER ("SpinnerStyle": 999 deserializes into the
+    /// enum unchecked) falls back to the field's default rather than to whatever
+    /// neighbouring member a clamp would land on.</summary>
+    private static T Definite<T>(T value, T fallback) where T : struct, Enum =>
+        Enum.IsDefined(value) ? value : fallback;
+
     /// <summary>An explicit JSON null ("StartupApps": null) deserializes over the
     /// property initializer; replace nulls with fresh defaults so a hand-edited
     /// config can never NRE the shell later (which would kill it before the panic
     /// handler runs). New nested object/list members belong in this list too.</summary>
     internal static AppConfig Normalize(AppConfig config)
     {
-        if (!Enum.IsDefined(config.DisplayManagement))
-        {
-            config.DisplayManagement = DisplayManagementMode.DpiOnly;
-        }
+        config.DisplayManagement = Definite(config.DisplayManagement, Defaults.DisplayManagement);
         config.StartupApps ??= [];
+        config.DeviceIntegration ??= new DeviceIntegrationConfig();
+        NormalizeDeviceIntegration(config.DeviceIntegration);
+        config.Performance ??= new PerformanceConfig();
+        NormalizePerformance(config.Performance);
         config.Cef ??= new CefConfig();
         config.Hotkey ??= new HotkeyConfig();
         config.GamepadChord ??= new GamepadChordConfig();
         config.Gestures ??= new GestureConfig();
-        config.SavedDisplayScales ??= [];
+        config.QuickAccessPins ??= [];
+        config.QuickAccessPins = config.QuickAccessPins
+            .Where(static id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToList();
         config.SavedDisplayScaleEntries ??= [];
         config.DisplayProfiles ??= [];
         config.PreviousConsoleLockSchemeValues ??= [];
@@ -172,7 +325,6 @@ public static class ConfigStore
         config.ForgottenInsertedCardIds ??= [];
         config.ForgottenInsertedCardIds = config.ForgottenInsertedCardIds
             .Where(static id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToList();
-        config.CategoryTabs ??= [];
         config.CustomTabs ??= [];
         config.LibraryTabOrder ??= [];
         config.HiddenNativeTabs ??= [];
@@ -208,21 +360,12 @@ public static class ConfigStore
             card.ContentId ??= "";
             card.Name ??= "";
             card.AppIds ??= [];
-            card.CollectionId ??= "";
-            card.LastLetter ??= "";
-        }
-        config.CategoryTabs = config.CategoryTabs.Where(static category => category is not null).ToList();
-        foreach (var category in config.CategoryTabs)
-        {
-            category.Name ??= "";
-            category.CollectionId ??= "";
         }
         config.CustomTabs = config.CustomTabs.Where(static tab => tab is not null).ToList();
         foreach (var tab in config.CustomTabs)
         {
             tab.Id = string.IsNullOrWhiteSpace(tab.Id) ? Guid.NewGuid().ToString("N") : tab.Id;
             tab.Name ??= "";
-            tab.CollectionId ??= "";
             tab.FilterTree ??= new FilterNode { Kind = FilterKind.Merge };
             NormalizeFilter(tab.FilterTree);
         }
@@ -263,11 +406,223 @@ public static class ConfigStore
         {
             link.Name ??= "";
         }
-        config.AccentColor ??= "#FFFF9D3D";
+        config.AccentColor ??= Defaults.AccentColor;
         config.AccentColor = Truncate(config.AccentColor, MaxColorLength, "Accent color");
         config.Splash ??= new SplashConfig();
         NormalizeSplash(config.Splash);
         return config;
+    }
+
+    /// <summary>
+    /// Brings device-integration configuration into a shape the rest of WSGM can rely on.
+    /// </summary>
+    /// <param name="device">The section to normalize in place.</param>
+    /// <remarks>
+    /// Internal rather than private so its rules can be tested directly. It touches only the object
+    /// handed to it and reads no file, which is what keeps a test off the developer's real
+    /// configuration.
+    /// </remarks>
+    internal static void NormalizeDeviceIntegration(DeviceIntegrationConfig device)
+    {
+        device.ControllerTarget = Definite(
+            device.ControllerTarget, Defaults.DeviceIntegration.ControllerTarget);
+        device.GlyphSelection = Definite(
+            device.GlyphSelection, Defaults.DeviceIntegration.GlyphSelection);
+        device.ManualGlyphProfileId = string.IsNullOrWhiteSpace(device.ManualGlyphProfileId)
+            ? null
+            : device.ManualGlyphProfileId.Trim();
+        device.ControllerTargets ??= [];
+        device.ControllerTargets.RemoveAll(static target => target is null
+            || string.IsNullOrWhiteSpace(target.ApplicationId)
+            || !Enum.IsDefined(target.Target));
+        HashSet<string> controllerApplications = new(StringComparer.Ordinal);
+        device.ControllerTargets.RemoveAll(
+            target => !controllerApplications.Add(target.ApplicationId.Trim()));
+        foreach (DeviceApplicationTargetOverride target in device.ControllerTargets)
+        {
+            target.ApplicationId = target.ApplicationId.Trim();
+        }
+
+        // A scope with no device, no plugin, or no values keys nothing and can never be matched, so
+        // it would sit in the file forever growing it. Values are only shape-checked here; whether
+        // one still satisfies its declared bounds is decided against the live manifest on load,
+        // because a plugin update can narrow a range after the value was stored.
+        device.PluginSettings ??= [];
+        device.PluginSettings.RemoveAll(static scope => scope is null
+            || string.IsNullOrWhiteSpace(scope.DeviceDefinitionId)
+            || string.IsNullOrWhiteSpace(scope.PluginId));
+        foreach (PluginSettingsScope scope in device.PluginSettings)
+        {
+            scope.DeviceDefinitionId = scope.DeviceDefinitionId.Trim();
+            scope.PluginId = scope.PluginId.Trim();
+
+            // Settings renders the cached declaration without activating plugin code. Drop malformed
+            // declarations so every rendered control has the bounds required by the SDK contract.
+            if (scope.Declaration is { } declaration && !declaration.TryValidate(out string? reason))
+            {
+                Log.Warn(
+                    $"Plugin settings: cached declaration for {scope.PluginId} on "
+                    + $"{scope.DeviceDefinitionId} was dropped: {reason}");
+                scope.Declaration = null;
+            }
+
+            // A profile with no id keys nothing and can never be selected, and one whose curve is
+            // not strictly ascending is refused by the device router on apply — keeping either
+            // would leave the user a profile that silently does nothing when chosen.
+            scope.Profiles ??= [];
+            scope.Profiles.RemoveAll(static profile => profile is null
+                || string.IsNullOrWhiteSpace(profile.ProfileId)
+                || string.IsNullOrWhiteSpace(profile.CapabilityId));
+            HashSet<string> profileIds = new(StringComparer.Ordinal);
+            scope.Profiles.RemoveAll(profile => !profileIds.Add(profile.ProfileId.Trim()));
+            foreach (DeviceAuthoredProfile profile in scope.Profiles)
+            {
+                profile.ProfileId = profile.ProfileId.Trim();
+                profile.CapabilityId = profile.CapabilityId.Trim();
+                profile.Name = string.IsNullOrWhiteSpace(profile.Name)
+                    ? profile.ProfileId
+                    : profile.Name.Trim();
+                if (profile.Name.Length > DeviceAuthoredProfile.MaxNameLength)
+                {
+                    profile.Name = profile.Name[..DeviceAuthoredProfile.MaxNameLength];
+                }
+
+                profile.Curve ??= [];
+                profile.Curve.RemoveAll(static point => point is null);
+            }
+
+            // A selection naming no capability resolves nothing. One naming a profile that no
+            // longer exists is deliberately KEPT: the resolver reports it by name, and dropping it
+            // here would turn a diagnosable mistake into a per-application override that vanished
+            // without explanation.
+            scope.ProfileSelections ??= [];
+            scope.ProfileSelections.RemoveAll(static selection => selection is null
+                || string.IsNullOrWhiteSpace(selection.CapabilityId));
+            HashSet<string> selectionCapabilities = new(StringComparer.Ordinal);
+            scope.ProfileSelections.RemoveAll(
+                selection => !selectionCapabilities.Add(selection.CapabilityId.Trim()));
+            foreach (DeviceProfileSelection selection in scope.ProfileSelections)
+            {
+                selection.CapabilityId = selection.CapabilityId.Trim();
+                selection.ApplicationOverrides ??= [];
+                selection.ApplicationOverrides.RemoveAll(static entry => entry is null
+                    || string.IsNullOrWhiteSpace(entry.ApplicationId)
+                    || string.IsNullOrWhiteSpace(entry.ProfileId));
+                HashSet<string> applications = new(StringComparer.Ordinal);
+                selection.ApplicationOverrides.RemoveAll(
+                    entry => !applications.Add(entry.ApplicationId.Trim()));
+                foreach (DeviceApplicationProfileSelection entry in selection.ApplicationOverrides)
+                {
+                    entry.ApplicationId = entry.ApplicationId.Trim();
+                    entry.ProfileId = entry.ProfileId.Trim();
+                }
+            }
+
+            scope.Profiles.RemoveAll(static profile =>
+            {
+                if (profile.Curve.Count == 0)
+                {
+                    return false;
+                }
+
+                for (int index = 1; index < profile.Curve.Count; index++)
+                {
+                    if (profile.Curve[index].Input <= profile.Curve[index - 1].Input)
+                    {
+                        Log.Warn(
+                            $"Device profile '{profile.ProfileId}' was dropped: its curve inputs "
+                            + "are not strictly ascending.");
+                        return true;
+                    }
+                }
+
+                return false;
+            });
+            scope.Values ??= [];
+            scope.Values.RemoveAll(static value => value is null
+                || string.IsNullOrWhiteSpace(value.SettingId));
+            HashSet<string> settingIds = new(StringComparer.Ordinal);
+            scope.Values.RemoveAll(value => !settingIds.Add(value.SettingId.Trim()));
+            foreach (PluginSettingValue value in scope.Values)
+            {
+                value.SettingId = value.SettingId.Trim();
+            }
+        }
+
+        HashSet<(string DeviceDefinitionId, string PluginId)> scopeKeys = [];
+        device.PluginSettings.RemoveAll(
+            scope => !scopeKeys.Add((scope.DeviceDefinitionId, scope.PluginId)));
+
+        device.Profiles ??= [];
+        device.Profiles.RemoveAll(static profile => profile is null
+            || string.IsNullOrWhiteSpace(profile.DeviceIdentityKey));
+        foreach (DeviceDesiredProfile profile in device.Profiles)
+        {
+            profile.DeviceIdentityKey = profile.DeviceIdentityKey.Trim();
+            profile.SelectedHardwareProfileId = string.IsNullOrWhiteSpace(profile.SelectedHardwareProfileId)
+                ? null
+                : profile.SelectedHardwareProfileId.Trim();
+            profile.Capabilities ??= [];
+            profile.OemAssignments ??= [];
+            profile.Capabilities.RemoveAll(static capability => capability is null
+                || string.IsNullOrWhiteSpace(capability.CapabilityId));
+            foreach (DeviceCapabilityPreference capability in profile.Capabilities)
+            {
+                capability.CapabilityId = capability.CapabilityId.Trim();
+                capability.InstanceId = string.IsNullOrWhiteSpace(capability.InstanceId)
+                    ? null
+                    : capability.InstanceId.Trim();
+                capability.HardwareProfiles ??= [];
+                capability.ApplicationOverrides ??= [];
+                capability.HardwareProfiles.RemoveAll(static value => value is null
+                    || string.IsNullOrWhiteSpace(value.ProfileId));
+                capability.ApplicationOverrides.RemoveAll(static value => value is null
+                    || string.IsNullOrWhiteSpace(value.ApplicationId));
+            }
+
+            profile.OemAssignments.RemoveAll(static assignment => assignment is null
+                || string.IsNullOrWhiteSpace(assignment.ControlId)
+                || !Enum.IsDefined(assignment.Action));
+        }
+    }
+
+    private static void NormalizePerformance(PerformanceConfig performance)
+    {
+        performance.FrameLimitStrategy = Definite(
+            performance.FrameLimitStrategy, Defaults.Performance.FrameLimitStrategy);
+        performance.Applications ??= [];
+        performance.Applications.RemoveAll(static application => application is null
+            || string.IsNullOrWhiteSpace(application.ApplicationId));
+        HashSet<string> identities = new(StringComparer.Ordinal);
+        performance.Applications.RemoveAll(application =>
+            !identities.Add(application.ApplicationId.Trim()));
+        foreach (PerformanceApplicationConfig application in performance.Applications)
+        {
+            application.ApplicationId = application.ApplicationId.Trim();
+            application.RtssProfileName ??= string.Empty;
+            application.RtssProfileName = application.RtssProfileName.Trim();
+            if (application.RtssProfileName.Length > 128
+                || !string.Equals(
+                    Path.GetFileName(application.RtssProfileName),
+                    application.RtssProfileName,
+                    StringComparison.Ordinal)
+                || !application.RtssProfileName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                application.RtssProfileName = string.Empty;
+            }
+        }
+
+        // An entry is no longer only an RTSS profile: it also carries the per-game performance
+        // profile, its power limit and its refresh preference. Dropping one for having no RTSS
+        // profile name would silently delete a game profile the user set up, so an entry survives
+        // as long as it still says something.
+        performance.Applications.RemoveAll(static application =>
+            string.IsNullOrWhiteSpace(application.RtssProfileName)
+            && !application.UsePerGameProfile
+            && application.FrameLimit is null
+            && application.OverlayLevel is null
+            && application.TdpWatts is null
+            && application.VariableRefreshRate is null);
     }
 
     private static void NormalizeDisplayMode(DisplayModeValues mode)
@@ -280,13 +635,13 @@ public static class ConfigStore
 
     private static void NormalizeFilter(FilterNode node)
     {
-        if (!Enum.IsDefined(node.Kind)) { node.Kind = FilterKind.Installed; }
-        if (!Enum.IsDefined(node.Mode)) { node.Mode = FilterMode.And; }
-        if (!Enum.IsDefined(node.Condition)) { node.Condition = ThresholdCondition.Above; }
-        if (!Enum.IsDefined(node.Platform)) { node.Platform = PlatformKind.Steam; }
-        if (!Enum.IsDefined(node.ScoreType)) { node.ScoreType = ReviewScoreType.SteamPercent; }
-        if (!Enum.IsDefined(node.Units)) { node.Units = TimeUnit.Hours; }
-        if (!Enum.IsDefined(node.CardScope)) { node.CardScope = SdCardScope.Inserted; }
+        node.Kind = Definite(node.Kind, FilterDefaults.Kind);
+        node.Mode = Definite(node.Mode, FilterDefaults.Mode);
+        node.Condition = Definite(node.Condition, FilterDefaults.Condition);
+        node.Platform = Definite(node.Platform, FilterDefaults.Platform);
+        node.ScoreType = Definite(node.ScoreType, FilterDefaults.ScoreType);
+        node.Units = Definite(node.Units, FilterDefaults.Units);
+        node.CardScope = Definite(node.CardScope, FilterDefaults.CardScope);
         node.CollectionId ??= "";
         node.Pattern ??= "";
         node.ContentId ??= "";
@@ -299,69 +654,57 @@ public static class ConfigStore
         }
     }
 
-    // Bounds for every numeric splash field, mirrored 1:1 from the Appearance
-    // editor's NumericUpDown Minimum/Maximum values (Settings\Pages\AppearancePage.axaml).
-    // The editor can never produce anything outside them — but a shared .wsgmsplash
-    // theme and a hand-edited config.json can, and the splash renderer only
-    // lower-bounds its inputs, so "SpinnerSize": 2147483647 would explode layout
-    // before the boot cover is usable. Clamping here covers BOTH untrusted paths:
-    // config load (via Normalize) and theme import (SplashTheme.Import).
-    private const int MinFontSize = 1;
-    private const int MaxTitleFontSize = 400;
-    private const int MaxCaptionFontSize = 200;
-    private const int MinSpinnerSize = 1;
-    private const int MaxSpinnerSize = 1024;
-    private const int MinLogoMaxSize = 1;
-    private const int MaxLogoMaxSize = 4096;
-    private const int MinPadding = 0;
-    private const int MaxPadding = 4096;
-    private const int MinAbsoluteCoordinate = 0;
-    private const int MaxAbsoluteCoordinate = 16384;
+    // The single source of the editor bounds: AppearancePage.axaml binds its
+    // NumericUpDown Minimum/Maximum and TextBox MaxLength values to these via
+    // x:Static, and normalization applies the same limits to config load and
+    // theme import, so the renderer sees the same bounded values regardless of
+    // their source.
+    /// <summary>Smallest splash font size the editor and normalization accept.</summary>
+    public const int MinFontSize = 1;
+    /// <summary>Largest splash title font size.</summary>
+    public const int MaxTitleFontSize = 400;
+    /// <summary>Largest splash caption font size.</summary>
+    public const int MaxCaptionFontSize = 200;
+    /// <summary>Smallest spinner size in logical pixels.</summary>
+    public const int MinSpinnerSize = 1;
+    /// <summary>Largest spinner size in logical pixels.</summary>
+    public const int MaxSpinnerSize = 1024;
+    /// <summary>Smallest logo maximum-edge length.</summary>
+    public const int MinLogoMaxSize = 1;
+    /// <summary>Largest logo maximum-edge length.</summary>
+    public const int MaxLogoMaxSize = 4096;
+    /// <summary>Smallest anchored-edge padding.</summary>
+    public const int MinPadding = 0;
+    /// <summary>Largest anchored-edge padding.</summary>
+    public const int MaxPadding = 4096;
+    /// <summary>Smallest absolute placement coordinate (an element placed off the
+    /// top-left is unreachable, not a feature).</summary>
+    public const int MinAbsoluteCoordinate = 0;
+    /// <summary>Largest absolute placement coordinate in logical pixels.</summary>
+    public const int MaxAbsoluteCoordinate = 16384;
 
-    // Length caps for the splash STRINGS, for the same reason the numbers above are
-    // clamped — except the damage here is layout cost, not a bad value. The title
-    // and the caption are each rendered as ONE unwrapped TextBlock line
-    // (Shell\BootSplashWindow sets no TextWrapping) and are bound straight into the
-    // Appearance text boxes on import. A shared .wsgmsplash may spend nearly its
-    // whole 1 MiB splash.json allowance on one of those strings — a trivially small
-    // archive once compressed — and Avalonia would then lay out hundreds of
-    // thousands of glyphs in a single run: first in Settings when the theme is
-    // imported, then in the boot splash on every following sign-in.
-    //
-    // 200 characters cannot plausibly cut a real splash line: a title is a few
-    // words ("Please wait", "Starting Steam Big Picture…"), and even at the default
-    // 26 px title size only ~130 characters fit across a 1080p panel before the
-    // single line runs off screen, so anything approaching the cap is already
-    // unreadable by design.
-    private const int MaxSplashTextLength = 200;
+    /// <summary>Splash title and caption are single unwrapped lines. This cap bounds
+    /// both Settings and boot layout work while remaining longer than the panel can
+    /// display usefully.</summary>
+    public const int MaxSplashTextLength = 200;
 
-    // Color strings are shown verbatim in the Appearance hex boxes and parsed by
-    // Shell\SplashStyle.ParseColor (splash) or Avalonia's Color.TryParse (accent).
-    // The longest value that can ever parse is "#AARRGGBB" (9 characters) or
-    // Avalonia's longest known-color name, "LightGoldenrodYellow" (20); 32 keeps
-    // every real value with room to spare.
-    //
-    // The accent color has exactly the same shape as the splash ones — hand-editable
-    // in config.json, bound to a TextBox, and re-parsed over its WHOLE length on every
-    // keystroke (Settings\Pages\AppearancePage re-parses it on each PropertyChanged to
-    // repaint the swatches and the picker) — so it is bounded here too. Without the
-    // cap a 1 MiB value survived Normalize and made every keystroke in that box parse
-    // a megabyte.
-    private const int MaxColorLength = 32;
+    /// <summary>Covers hexadecimal and named Avalonia colours with room to spare,
+    /// while bounding the text parsed on each live Appearance-page edit.</summary>
+    public const int MaxColorLength = 32;
 
     /// <summary>Repairs explicit JSON nulls inside a splash section (see
     /// <see cref="Normalize"/>), bounds the display strings, and clamps every
     /// numeric field into the range the Appearance editor enforces. Shared with
-    /// splash-theme import, which deserializes the same contract from untrusted
+    /// splash-theme import, which deserializes the same external contract from
     /// archives.</summary>
     internal static SplashConfig NormalizeSplash(SplashConfig splash)
     {
-        splash.Text ??= "Please wait";
-        splash.TextColor ??= "#FFFFFF";
-        splash.Caption ??= "";
-        splash.CaptionColor ??= "#666666";
-        splash.SpinnerColor ??= "#FFFFFF";
-        splash.BackgroundColor ??= "#000000";
+        splash.Text ??= Defaults.Splash.Text;
+        splash.TextColor ??= Defaults.Splash.TextColor;
+        splash.Caption ??= Defaults.Splash.Caption;
+        splash.CaptionColor ??= Defaults.Splash.CaptionColor;
+        splash.SpinnerColor ??= Defaults.Splash.SpinnerColor;
+        splash.BackgroundColor ??= Defaults.Splash.BackgroundColor;
         // Truncate rather than reject: a theme whose title is too long is still a
         // usable theme, and dropping the whole import over one field would lose the
         // images and every other setting with it.
@@ -385,17 +728,8 @@ public static class ConfigStore
         splash.CaptionFontSize = Math.Clamp(splash.CaptionFontSize, MinFontSize, MaxCaptionFontSize);
         splash.SpinnerSize = Math.Clamp(splash.SpinnerSize, MinSpinnerSize, MaxSpinnerSize);
         splash.LogoMaxSize = Math.Clamp(splash.LogoMaxSize, MinLogoMaxSize, MaxLogoMaxSize);
-        // A JSON number ("SpinnerStyle": 999) deserializes into the enum unchecked;
-        // an unknown member falls back to the field's default rather than to whatever
-        // neighbouring style a clamp would land on.
-        if ((int)splash.SpinnerStyle is < 0 or > (int)SplashSpinnerStyle.Off)
-        {
-            splash.SpinnerStyle = SplashSpinnerStyle.Ring;
-        }
-        if ((int)splash.SweepEdge is < 0 or > (int)SweepEdge.Top)
-        {
-            splash.SweepEdge = SweepEdge.Bottom;
-        }
+        splash.SpinnerStyle = Definite(splash.SpinnerStyle, Defaults.Splash.SpinnerStyle);
+        splash.SweepEdge = Definite(splash.SweepEdge, Defaults.Splash.SweepEdge);
         NormalizePlacement(splash.TextPlacement);
         NormalizePlacement(splash.SpinnerPlacement);
         NormalizePlacement(splash.LogoPlacement);
@@ -432,18 +766,10 @@ public static class ConfigStore
     /// unknown enum members back to their defaults.</summary>
     private static void NormalizePlacement(SplashElementPlacement placement)
     {
-        if ((int)placement.Mode is < 0 or > (int)SplashPlacementMode.WithText)
-        {
-            placement.Mode = SplashPlacementMode.Anchor;
-        }
-        if ((int)placement.Anchor is < 0 or > (int)SplashPlacementAnchor.BottomRight)
-        {
-            placement.Anchor = SplashPlacementAnchor.Center;
-        }
+        placement.Mode = Definite(placement.Mode, PlacementDefaults.Mode);
+        placement.Anchor = Definite(placement.Anchor, PlacementDefaults.Anchor);
         placement.PaddingX = Math.Clamp(placement.PaddingX, MinPadding, MaxPadding);
         placement.PaddingY = Math.Clamp(placement.PaddingY, MinPadding, MaxPadding);
-        // The editor's absolute X/Y spinners start at 0 (an element placed off the
-        // top-left is unreachable, not a feature), so negatives clamp up to 0 here.
         placement.X = Math.Clamp(placement.X, MinAbsoluteCoordinate, MaxAbsoluteCoordinate);
         placement.Y = Math.Clamp(placement.Y, MinAbsoluteCoordinate, MaxAbsoluteCoordinate);
     }
@@ -509,16 +835,40 @@ public static class ConfigStore
     /// <param name="config">The configuration state to serialize.</param>
     public static void Save(AppConfig config)
     {
-        using var guard = ConfigMutex.Acquire();
+        using var guard = ConfigMutex.Acquire(requireExclusive: true);
         Directory.CreateDirectory(Log.Directory);
         var json = JsonSerializer.Serialize(config, ConfigJsonContext.Default.AppConfig);
-        // Per-process temp name so concurrent savers never share it; a leftover
-        // .tmp from a failed rename is harmlessly overwritten by that process later.
-        var temp = $"{ConfigPath}.{Environment.ProcessId}.tmp";
-        File.WriteAllText(temp, json);
-        // Atomic replace (MoveFileEx REPLACE_EXISTING) — covers both the exists and
-        // not-yet-exists cases without a TOCTOU window.
-        File.Move(temp, ConfigPath, overwrite: true);
+        var temp = $"{ConfigPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            using (var stream = new FileStream(
+                       temp,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None))
+            using (var writer = new StreamWriter(stream))
+            {
+                writer.Write(json);
+            }
+
+            // Atomic replace (MoveFileEx REPLACE_EXISTING) — covers both the exists and
+            // not-yet-exists cases without a TOCTOU window.
+            File.Move(temp, ConfigPath, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temp);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // Cleanup must not replace the actual write/move failure with a
+                // secondary temp-file error. A unique orphan is harmless and can
+                // be diagnosed from this bounded warning.
+                Log.Warn($"Config temp cleanup failed for '{Path.GetFileName(temp)}': {ex.Message}");
+            }
+        }
     }
 
     /// <summary>The only supported read-modify-write path for config.json: takes the
@@ -534,7 +884,7 @@ public static class ConfigStore
     /// this method and ABORTS the mutation; <see cref="Load"/> stays available for
     /// read-only callers.</para>
     /// <para>A caller that needs more work under the same lock (see
-    /// SettingsViewModel.SaveMerged, which also promotes splash assets and writes the
+    /// SettingsViewModel's save transaction, which also promotes splash assets and writes the
     /// boot manifest) wraps this in its own <see cref="AcquireLock"/> scope — the
     /// nested acquisition is free.</para></summary>
     /// <param name="mutate">Applies the caller's fields to the freshly loaded configuration.</param>
@@ -542,7 +892,7 @@ public static class ConfigStore
     /// <exception cref="InvalidDataException">The existing file could not be parsed.</exception>
     internal static AppConfig Mutate(Action<AppConfig> mutate)
     {
-        using var guard = ConfigMutex.Acquire();
+        using var guard = ConfigMutex.Acquire(requireExclusive: true);
         var config = LoadForMutation();
         mutate(config);
         Save(config);
@@ -551,7 +901,7 @@ public static class ConfigStore
 
     /// <summary>Takes the cross-process config lock for a caller that must keep a
     /// whole read-modify-write sequence — plus the file work between its steps —
-    /// atomic against other WSGM processes. SettingsViewModel.SaveMerged holds it
+    /// atomic against other WSGM processes. SettingsViewModel.Save holds it
     /// across Load → Save → the splash-asset Commit → the boot-manifest write, so
     /// config.json and the live splash images can never be left describing different
     /// states. Only FAST operations belong in such a scope: the timeout below is
@@ -566,23 +916,32 @@ public static class ConfigStore
     /// recursion count instead made a contended save cost one timeout per nested call
     /// (Load + Save + repair Save + the outer scope ≈ 6-8 s of frozen UI and four
     /// "Config mutex timed out" lines). Only the OUTERMOST scope releases, so the hold
-    /// survives until this scope is disposed, and the degraded no-lock path is
-    /// inherited by the nested calls — acquiring the lock for one step of a sequence
-    /// whose outer scope already gave up would not restore any guarantee.</para></summary>
+    /// survives until this scope is disposed. Write transactions never enter a
+    /// degraded scope: timeout or mutex failure aborts them.</para></summary>
     /// <returns>A scope that releases the lock when disposed.</returns>
-    internal static IDisposable AcquireLock() => ConfigMutex.Acquire();
+    internal static IDisposable AcquireLock() => ConfigMutex.Acquire(requireExclusive: true);
+
+    /// <summary>Deep-copies one configuration document through the production JSON
+    /// contract — the one clone mechanism for config shapes, so a copy can never
+    /// diverge from what a save/load round trip would produce.</summary>
+    /// <typeparam name="T">A type registered on <see cref="ConfigJsonContext"/>.</typeparam>
+    /// <param name="value">The instance to copy.</param>
+    /// <param name="typeInfo">The source-generated metadata for <typeparamref name="T"/>.</param>
+    /// <returns>An isolated copy sharing no mutable state with <paramref name="value"/>.</returns>
+    internal static T CloneJson<T>(T value, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
+        where T : class, new() =>
+        JsonSerializer.Deserialize(JsonSerializer.Serialize(value, typeInfo), typeInfo) ?? new T();
 
     /// <summary>Test seam: how deeply the CALLING thread currently holds the config
     /// lock (0 = not held). Exists so the acquire/release balance of the nested scopes
     /// can be asserted without going near the per-user config file.</summary>
     internal static int LockDepth => ConfigMutex.CurrentDepth;
 
-    /// <summary>Whether the calling thread owns the named mutex rather than using
-    /// the recovery-only degraded path.</summary>
+    /// <summary>Whether the calling thread owns the named mutex.</summary>
     internal static bool HasExclusiveLock => ConfigMutex.HasExclusiveOwnership;
 
-    /// <summary>Cross-process guard around Load/Save. Failure to create or acquire
-    /// the mutex degrades to lock-less operation with a warning — never a deadlock.
+    /// <summary>Cross-process guard around Load/Save. Read-only loads may degrade
+    /// with a warning; writes fail closed when the mutex cannot be acquired.
     /// Re-entrant per thread through a depth counter: only the outermost scope talks
     /// to the kernel object, so a nested acquisition costs nothing even while another
     /// process holds the lock.
@@ -626,11 +985,16 @@ public static class ConfigStore
         internal static int CurrentDepth => _depth;
         internal static bool HasExclusiveOwnership => _hasExclusiveOwnership;
 
-        public static ConfigMutex Acquire()
+        public static ConfigMutex Acquire(bool requireExclusive)
         {
             if (_depth > 0)
             {
-                // Already held by this thread (SaveMerged's scope around Load/Save):
+                if (requireExclusive && !_hasExclusiveOwnership)
+                {
+                    throw new InvalidOperationException(
+                        "An exclusive config operation cannot be nested inside a degraded read.");
+                }
+                // Already held by this thread (Settings Save's scope around Load/Save):
                 // no kernel call, and above all no second MutexTimeoutMs wait.
                 _depth++;
                 return new ConfigMutex(null, owned: false, nested: true, level: _depth);
@@ -653,12 +1017,24 @@ public static class ConfigStore
                 }
                 if (!owned)
                 {
-                    Log.Warn("Config mutex timed out — proceeding without cross-process lock.");
+                    if (requireExclusive)
+                    {
+                        throw new TimeoutException(
+                            "The shared WSGM configuration is busy; the save was not performed.");
+                    }
+
+                    Log.Warn("Config mutex timed out — continuing with a read-only snapshot.");
                 }
             }
             catch (Exception ex)
             {
-                Log.Warn($"Config mutex unavailable, proceeding without lock: {ex.Message}");
+                if (requireExclusive)
+                {
+                    mutex?.Dispose();
+                    throw;
+                }
+
+                Log.Warn($"Config mutex unavailable for read-only load: {ex.Message}");
             }
             // Counted even when the acquisition degraded, so the nested steps of one
             // sequence inherit that decision instead of each paying the timeout again.
@@ -677,18 +1053,8 @@ public static class ConfigStore
             }
             _disposed = true;
 
-            // Pop to this scope's own level rather than decrementing blindly. Scopes
-            // are meant to nest strictly (`using` blocks), but disposing them OUT OF
-            // ORDER used to drive the counter negative — the outermost scope assigned
-            // 0 while a nested one was still live, and that nested Dispose then made
-            // it -1, after which the next Acquire on this thread took the slow kernel
-            // path even though the lock was free, and a later nested scope could pop
-            // an unrelated real acquisition. The guard covers both directions:
-            //   • depth still at or above this level → this scope is the deepest one
-            //     that is still counted, so its level - 1 is the correct new depth;
-            //   • depth already BELOW it → an outer scope was disposed first and has
-            //     reset the counter (possibly for a fresh acquisition since), so this
-            //     late Dispose must not touch it at all.
+            // Each scope owns one recorded depth. A late out-of-order Dispose must not pop a newer
+            // acquisition, so it changes depth only while its own level is still counted.
             if (_depth >= _level)
             {
                 _depth = _level - 1;
@@ -714,12 +1080,8 @@ public static class ConfigStore
             }
             catch (Exception ex)
             {
-                // Never let lock cleanup break a save/load path — but never let it skip
-                // the handle either: a swallowed ReleaseMutex failure used to leave the
-                // Mutex undisposed AND the named object owned, after which every other
-                // WSGM process ran the degraded lock-less path for the rest of the
-                // session. Closing the handle abandons the mutex instead, which the
-                // next waiter gets (as AbandonedMutexException) immediately.
+                // Cleanup failure does not replace the save/load outcome. The handle is still
+                // disposed below so the next waiter observes abandonment instead of a stuck owner.
                 Log.Warn($"Config mutex release failed: {ex.Message}");
             }
             finally

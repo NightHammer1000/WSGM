@@ -76,16 +76,8 @@ internal sealed class RegistryValueSnapshot<T>
 
     public bool IsCaptured(AppConfig config) => _load(config).Captured;
 
-    /// <summary>True when restore should write a value back rather than delete it.
-    /// Older config files stored a non-null value without an explicit presence bit —
-    /// keep them recoverable while all new snapshots use the precise captured/exists
-    /// pair. (The legacy clause can only ever fire for reference-typed values;
-    /// value-typed snapshots are gated on <see cref="IsCaptured"/> by their callers.)</summary>
-    public bool HasValue(AppConfig config)
-    {
-        var state = _load(config);
-        return state.Exists || (!state.Captured && state.Value is not null);
-    }
+    /// <summary>True when restore should write a value back rather than delete it.</summary>
+    public bool HasValue(AppConfig config) => _load(config).Exists;
 
     /// <summary>Puts the registry back the way the snapshot recorded it: rewrite the
     /// saved value with its original (normalized) kind, or delete the value if the

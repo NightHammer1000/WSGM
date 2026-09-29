@@ -3,7 +3,8 @@
      hc-* card/footer classes. Accent-family tokens are consumed via
      DynamicResource (runtime accent pipeline); everything else StaticResource. -->
 <Styles xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:c="clr-namespace:WSGM.Controls">
     <Styles.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -18,15 +19,6 @@
         <Setter Property="Background" Value="{StaticResource HcBackgroundBrush}" />
     </Style>
 
-    <!-- Avalonia port of iNKORE Modern WPF SettingsCard: icon, title,
-         description and a trailing interactive control. -->
-    <Style Selector="Border.hc-settings-card">
-        <Setter Property="Background" Value="{StaticResource HcCardBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource HcCardBorderBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="4" />
-        <Setter Property="Padding" Value="10,6" />
-    </Style>
     <Style Selector="Border.hc-device-card">
         <Setter Property="Background" Value="{StaticResource HcHeroCardBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource HcHeroCardBrush}" />
@@ -42,8 +34,7 @@
 
     <!-- Unified focus visual: no focus adorner anywhere; every button carries a
          2 px border that flips to the accent color on focus (the device-proven
-         overlay mechanism). Padding is 1 px smaller than the historical 1 px
-         border style so the rendered size is unchanged. -->
+         overlay mechanism). -->
     <Style Selector="Button">
         <Setter Property="MinHeight" Value="26" />
         <Setter Property="Padding" Value="7,2" />
@@ -98,10 +89,7 @@
         <Setter Property="MinWidth" Value="72" />
     </Style>
 
-    <!-- Expandable list rows shared by the radio and eject panels. These lived as
-         identical copies in both windows, which is how the header lost its focus
-         visual in one place and not the other; they belong here so a fix cannot
-         apply to only one panel again. -->
+    <!-- Expandable list rows shared by the radio and eject panels. -->
     <Style Selector="Border.radio-row">
         <Setter Property="Background" Value="{StaticResource HcCardBrush}" />
         <Setter Property="CornerRadius" Value="6" />
@@ -111,12 +99,9 @@
     <Style Selector="Border.radio-row.selected">
         <Setter Property="BorderBrush" Value="{DynamicResource HcAccentBrush}" />
     </Style>
-    <!-- The row header carries the unified focus visual itself: a constant 2 px
-         border that flips to the accent on :focus. The row's own accent border only
-         marks the EXPANDED row, so without this a controller cursor moving down the
-         list would be invisible — on the surfaces that join a network and eject a
-         drive. Padding drops by the border width so the rendered row size is
-         unchanged. -->
+    <!-- The row header carries the unified focus visual itself: the row's own
+         accent border only marks the EXPANDED row, so without this a controller
+         cursor moving down the list would be invisible. -->
     <Style Selector="Button.radio-row-header">
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderBrush" Value="Transparent" />
@@ -133,5 +118,29 @@
         <Setter Property="Orientation" Value="Horizontal" />
         <Setter Property="Spacing" Value="8" />
         <Setter Property="Margin" Value="10,0,10,10" />
+    </Style>
+    <!-- Glyph preview tiles. The lit state is the accent, matching every other
+         "this is the one" signal on these surfaces, so the input test reads the
+         same way as focus and selection do rather than inventing a third colour.
+         The tiles are not focus stops, so the border is free to mean only that. -->
+    <Style Selector="Border.glyph-tile">
+        <Setter Property="Background" Value="{DynamicResource HcControlBrush}" />
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="2" />
+    </Style>
+    <Style Selector="Border.glyph-tile > StackPanel > TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource HcTextMutedBrush}" />
+    </Style>
+    <Style Selector="Border.glyph-tile > StackPanel > c|PhysicalGlyphImage">
+        <Setter Property="Foreground" Value="{DynamicResource HcTextSecondaryBrush}" />
+    </Style>
+    <Style Selector="Border.glyph-tile.pressed">
+        <Setter Property="BorderBrush" Value="{DynamicResource HcAccentBrush}" />
+    </Style>
+    <Style Selector="Border.glyph-tile.pressed > StackPanel > TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource HcTextPrimaryBrush}" />
+    </Style>
+    <Style Selector="Border.glyph-tile.pressed > StackPanel > c|PhysicalGlyphImage">
+        <Setter Property="Foreground" Value="{DynamicResource HcAccentBrush}" />
     </Style>
 </Styles>

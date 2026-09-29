@@ -6,7 +6,7 @@ Builds the vendored Steam Input Lease library and stages its output for WSGM.
 The library lives in this repository at native\SteamInput and is built from
 source on every WSGM build, so the shipped gate can never drift from the code
 next to it. Its build output is staged into src\WSGM\Native\SteamInputLease,
-which WSGM.csproj copies beside the AOT executable and the installer ships.
+which WSGM.csproj copies beside the application executable and the installer ships.
 That staging directory is generated and is not committed.
 
 .PARAMETER Validate
@@ -104,9 +104,8 @@ if ($Validate) {
     }
 }
 
-# Repopulating in place would let an artifact that is no longer produced (a
-# renamed or dropped DLL) survive in the staging directory, get copied beside the
-# AOT executable by the csproj wildcards and ship in the installer. Start empty.
+# Start from an empty staging directory so renamed or dropped artifacts cannot ship through the
+# application project's wildcard copy.
 #
 # Best-effort, NOT fatal: steam_input_gate.dll is injected into a running steam.exe
 # and stays mapped until Steam restarts, so on a machine where the gate was used for

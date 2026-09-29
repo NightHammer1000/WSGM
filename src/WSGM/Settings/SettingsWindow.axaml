@@ -12,8 +12,8 @@
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource HcBackgroundBrush}">
 
-    <!-- Dense two-column utility layout (approved "Option 3 rev 2"): bumper
-         TabStrip on top, seven always-alive pages toggled by IsVisible (scroll
+    <!-- Dense two-column utility layout: bumper
+         TabStrip on top, always-alive pages toggled by IsVisible (scroll
          positions survive), status strip at the bottom. These styles are the
          setting-row family shared by every page: zebra rows on the page surface
          (HcHeaderBrush) with HcBackgroundBrush "alt" stripes, a 2 px transparent
@@ -83,10 +83,12 @@
             <pages:SystemPage x:Name="PageSystem" IsVisible="True" />
             <pages:SteamPage x:Name="PageSteam" IsVisible="False" />
             <pages:IntegrationPage x:Name="PageIntegration" IsVisible="False" />
+            <pages:DeviceOwnershipPage x:Name="PageDevice" IsVisible="False" />
             <pages:StartupPage x:Name="PageStartup" IsVisible="False" />
             <pages:QuickAccessPage x:Name="PageQuickAccess" IsVisible="False" />
             <pages:DisplayPage x:Name="PageDisplay" IsVisible="False" />
             <pages:AppearancePage x:Name="PageAppearance" IsVisible="False" />
+            <pages:PluginSettingsPage x:Name="PagePluginSettings" IsVisible="False" />
         </Grid>
 
         <Border Grid.Row="2" Classes="hc-footer">
@@ -94,7 +96,8 @@
                 <Button Classes="primary" Content="Save changes" Command="{Binding SaveCommand}" MinWidth="120" />
                 <TextBlock Grid.Column="1" Text="{Binding ServiceStateText}" Classes="caption" VerticalAlignment="Center" />
                 <TextBlock Grid.Column="2" Text="{Binding ShellStateText}" Classes="caption" VerticalAlignment="Center" />
-                <TextBlock Grid.Column="3" Text="{Binding StatusText}" Classes="caption" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="3" Text="{Binding StatusText}" Classes="caption"
+                           VerticalAlignment="Center" TextWrapping="Wrap" MaxLines="2" />
                 <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal" Spacing="5">
                         <ov:GlyphIcon Width="18" Height="18" Button="a" GlyphStyle="{Binding GlyphStyle}" VerticalAlignment="Center" />

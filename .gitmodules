@@ -1,0 +1,18 @@
+[submodule "native/SteamInput"]
+	path = native/SteamInput
+	url = https://github.com/KillerPixelCrew/steam-input-lease
+[submodule "external/windows-device-control"]
+	path = external/windows-device-control
+	url = https://github.com/KillerPixelCrew/windows-device-control
+[submodule "external/WSGM.Device.Sdk"]
+	path = external/WSGM.Device.Sdk
+	url = https://github.com/KillerPixelCrew/WSGM.Device.Sdk
+[submodule "external/steam-ui-toolkit"]
+	path = external/steam-ui-toolkit
+	url = https://github.com/KillerPixelCrew/steam-ui-toolkit
+[submodule "external/WSGM.DeviceLab"]
+	path = external/WSGM.DeviceLab
+	url = https://github.com/KillerPixelCrew/WSGM.DeviceLab
+[submodule "external/WSGM.Device.Msi.Claw8A2Vm"]
+	path = external/WSGM.Device.Msi.Claw8A2Vm
+	url = https://github.com/KillerPixelCrew/WSGM.Device.Msi.Claw8A2Vm

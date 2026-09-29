@@ -9,7 +9,6 @@ namespace WSGM.Input;
 public sealed class GamepadChordRecorder : IDisposable
 {
     private readonly GamepadService _gamepad;
-    private readonly bool _ownsService;
     private readonly ChordTracker _tracker;
     private readonly DispatcherTimer _expiryTimer;
     private bool _recording;
@@ -17,18 +16,19 @@ public sealed class GamepadChordRecorder : IDisposable
     /// <summary>(buttons, isHold). Empty buttons = cancelled/timed out.</summary>
     public event Action<GamepadButtons, bool>? Recorded;
 
-    /// <summary>Creates a recorder using the supplied polling service or an owned service.</summary>
-    /// <param name="gamepad">An existing polling service, or <see langword="null"/> to create one.</param>
-    public GamepadChordRecorder(GamepadService? gamepad = null)
+    /// <summary>Creates a recorder over an existing polling service, which stays the caller's:
+    /// the recorder never stops or disposes it, so a second SDL poller never exists.</summary>
+    /// <param name="gamepad">The caller's polling service.</param>
+    public GamepadChordRecorder(GamepadService gamepad)
     {
-        _ownsService = gamepad is null;
-        _gamepad = gamepad ?? new GamepadService();
+        ArgumentNullException.ThrowIfNull(gamepad);
+        _gamepad = gamepad;
 
         _tracker = new ChordTracker();
         _tracker.HoldElapsed += pad => Finish(pad.Union, isHold: true);
         _tracker.Released += pad => Finish(pad.Union, isHold: false);
 
-        _expiryTimer = new DispatcherTimer { Interval = ChordTiming.RecordingExpiry };
+        _expiryTimer = new DispatcherTimer { Interval = ChordTracker.RecordingExpiry };
         // The hold timer resolves any pressed buttons long before expiry and a full
         // release finishes immediately, so expiring can only mean no input at all.
         _expiryTimer.Tick += (_, _) => Finish(0, isHold: false, cancelled: true);
@@ -73,10 +73,6 @@ public sealed class GamepadChordRecorder : IDisposable
         _expiryTimer.Stop();
         _tracker.Reset();
         _gamepad.StateChanged -= OnStateChanged;
-        if (_ownsService)
-        {
-            _gamepad.Stop();
-        }
 
         var buttons = cancelled ? 0 : union;
         Log.Info($"Recorded controller chord: {GamepadService.Describe(buttons, isHold)}");
@@ -86,15 +82,11 @@ public sealed class GamepadChordRecorder : IDisposable
     /// <summary>Cancels recording and reports an empty chord.</summary>
     public void Cancel() => Finish(0, isHold: false, cancelled: true);
 
-    /// <summary>Stops recording and releases an owned polling service.</summary>
+    /// <summary>Stops recording; the caller's polling service keeps running.</summary>
     public void Dispose()
     {
         _gamepad.StateChanged -= OnStateChanged;
         _expiryTimer.Stop();
         _tracker.Dispose();
-        if (_ownsService)
-        {
-            _gamepad.Dispose();
-        }
     }
 }

@@ -1,10 +1,139 @@
 using System.Text.Json;
 using WSGM.Core;
+using WSGM.Device.Sdk.Capabilities;
 
 namespace WSGM.Tests;
 
 public sealed class ConfigurationTests
 {
+    [Fact]
+    public void JsonNullIsRejectedInsteadOfBecomingSilentDefaults()
+    {
+        Assert.Throws<JsonException>(() => ConfigStore.DeserializeConfig("null"));
+    }
+
+    [Fact]
+    public void AnUnknownDeviceEnumNameIsRepairedInsteadOfDiscardingTheWholeFile()
+    {
+        // Every enum here is written by name, so an unrecognised one throws before Normalize can
+        // apply its Enum.IsDefined fallbacks. If the repair pass does not cover it, the retry
+        // throws too and Load moves the entire file aside — taking the registry recovery snapshots
+        // and every unrelated setting with it. The values below are what a hand edit, or a
+        // configuration written by a build that knows more names, looks like.
+        const string json = """
+        {
+          "AccentColor": "#FF00AA",
+          "DeviceIntegration": {
+            "Enabled": true,
+            "ControllerTarget": "NintendoSwitchPro",
+            "GlyphSelection": "SomethingElse",
+            "DiagnosticLevel": "Verbose",
+            "ControllerTargets": [
+              { "ApplicationId": "steam:70", "Target": "NotATarget" }
+            ],
+            "Profiles": [
+              {
+                "DeviceIdentityKey": "device",
+                "OemAssignments": [ { "ControlId": "oem1", "Action": "LaunchAnything" } ],
+                "Capabilities": [
+                  {
+                    "CapabilityId": "power.primary-limit",
+                    "GlobalDefault": { "Kind": "Wattage", "IntegerValue": 15 }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """;
+
+        AppConfig? config = ConfigStore.DeserializeConfig(json);
+
+        Assert.NotNull(config);
+        // The unrelated setting survived, which is the point of repairing rather than discarding.
+        Assert.Equal("#FF00AA", config.AccentColor);
+        Assert.True(config.DeviceIntegration.Enabled);
+        Assert.Equal(
+            ManagedControllerTarget.SteamDeckComposite,
+            config.DeviceIntegration.ControllerTarget);
+        Assert.Equal(DeviceGlyphSelection.Automatic, config.DeviceIntegration.GlyphSelection);
+        Assert.Equal(
+            ManagedControllerTarget.SteamDeckComposite,
+            Assert.Single(config.DeviceIntegration.ControllerTargets).Target);
+        DeviceDesiredProfile profile = Assert.Single(config.DeviceIntegration.Profiles);
+        Assert.Equal(OemAction.Disabled, Assert.Single(profile.OemAssignments).Action);
+        Assert.Equal(
+            WSGM.Device.Sdk.Capabilities.CapabilityValueKind.None,
+            Assert.Single(profile.Capabilities).GlobalDefault!.Kind);
+    }
+
+    [Fact]
+    public void UnknownPerformanceAndCachedDeclarationEnumsDoNotDiscardTheConfig()
+    {
+        const string json = """
+        {
+          "AccentColor": "#FF00AA",
+          "Performance": { "FrameLimitStrategy": "FutureStrategy" },
+          "DeviceIntegration": {
+            "PluginSettings": [
+              {
+                "DeviceDefinitionId": "device",
+                "PluginId": "plugin",
+                "Declaration": {
+                  "Sections": [ { "SectionId": "general", "Key": "FutureSection" } ],
+                  "Settings": [
+                    {
+                      "SettingId": "future",
+                      "ValueKind": "FutureValue",
+                      "Display": { "Key": "FutureLabel" },
+                      "Default": { "Kind": "FutureValue" },
+                      "Unit": "FutureUnit"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+        """;
+
+        AppConfig? config = ConfigStore.DeserializeConfig(json);
+
+        Assert.NotNull(config);
+        Assert.Equal("#FF00AA", config.AccentColor);
+        Assert.Equal(FrameLimitStrategy.FrameLimitOnly, config.Performance.FrameLimitStrategy);
+        Assert.Equal(
+            CapabilityValueKind.None,
+            Assert.Single(Assert.Single(config.DeviceIntegration.PluginSettings)
+                .Declaration!.Settings).ValueKind);
+    }
+
+    [Fact]
+    public void NormalizeRepairsAnExplicitNullRtssProfileName()
+    {
+        var config = new AppConfig
+        {
+            Performance = new PerformanceConfig
+            {
+                Applications =
+                [
+                    new PerformanceApplicationConfig
+                    {
+                        ApplicationId = "steam:10",
+                        RtssProfileName = null!,
+                        UsePerGameProfile = true,
+                    },
+                ],
+            },
+        };
+
+        PerformanceApplicationConfig application = Assert.Single(
+            ConfigStore.Normalize(config).Performance.Applications);
+
+        Assert.Equal(string.Empty, application.RtssProfileName);
+        Assert.True(application.UsePerGameProfile);
+    }
+
     [Fact]
     public void NormalizeRepairsEveryNullableCollectionAndNestedSection()
     {
@@ -14,13 +143,11 @@ public sealed class ConfigurationTests
             Hotkey = null!,
             GamepadChord = null!,
             Gestures = null!,
-            SavedDisplayScales = null!,
             SavedDisplayScaleEntries = null!,
             DisplayProfiles = null!,
             PreviousConsoleLockSchemeValues = null!,
             CardLibraries = null!,
             ForgottenInsertedCardIds = null!,
-            CategoryTabs = null!,
             CustomTabs = null!,
             LaunchWrappers = null!,
             SgdbLinks = null!,
@@ -38,13 +165,11 @@ public sealed class ConfigurationTests
         Assert.NotNull(normalized.Hotkey);
         Assert.NotNull(normalized.GamepadChord);
         Assert.NotNull(normalized.Gestures);
-        Assert.NotNull(normalized.SavedDisplayScales);
         Assert.NotNull(normalized.SavedDisplayScaleEntries);
         Assert.NotNull(normalized.DisplayProfiles);
         Assert.NotNull(normalized.PreviousConsoleLockSchemeValues);
         Assert.NotNull(normalized.CardLibraries);
         Assert.NotNull(normalized.ForgottenInsertedCardIds);
-        Assert.NotNull(normalized.CategoryTabs);
         Assert.NotNull(normalized.CustomTabs);
         Assert.NotNull(normalized.LaunchWrappers);
         Assert.NotNull(normalized.SgdbLinks);
@@ -406,12 +531,12 @@ public sealed class ConfigurationTests
     [Fact]
     public void TheConfigLockIsReentrantOnTheSameThreadSoNestedLoadAndSaveStillBalance()
     {
-        // SettingsViewModel.SaveMerged holds this scope across Mutate → Commit
+        // The Settings save transaction holds this scope across Mutate → Commit
         // while ConfigStore.Load/Save re-acquire the same named mutex inside it.
         using var outer = ConfigStore.AcquireLock();
-        // Acquire() degrades to a lock-less scope when the named mutex is already held
-        // by another process; every exclusivity assertion below would then pass without
-        // testing anything, so fail loudly instead.
+        // Write scopes fail closed when another process owns the mutex. Keep the
+        // assertion as an explicit statement that the following checks exercise the
+        // real kernel lock rather than only the thread-local recursion counter.
         Assert.True(ConfigStore.HasExclusiveLock, "the config mutex was held elsewhere");
 
         var nested = System.Diagnostics.Stopwatch.StartNew();
@@ -874,7 +999,7 @@ public sealed class ConfigurationTests
         bool current,
         bool requested,
         bool expected)
-        => Assert.Equal(expected, DisplayHdr.ShouldChange(available, current, requested));
+        => Assert.Equal(expected, DisplayScale.ShouldChange(available, current, requested));
 
     [Fact]
     public void GameModeBootFieldsRoundTripThroughSourceGeneratedJson()

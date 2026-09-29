@@ -1,4 +1,4 @@
-using WSGM.Core;
+using WSGM.Shell;
 
 namespace WSGM.Tests;
 
@@ -12,7 +12,7 @@ public class CardLibraryDecisionTests
     {
         Assert.Equal(
             CardLibraryAction.None,
-            CardLibraryDecision.Decide("777", ["777"]));
+            CardVolumeMonitor.Decide("777", ["777"]));
     }
 
     [Fact]
@@ -20,7 +20,7 @@ public class CardLibraryDecisionTests
     {
         Assert.Equal(
             CardLibraryAction.Add,
-            CardLibraryDecision.Decide("777", []));
+            CardVolumeMonitor.Decide("777", []));
     }
 
     [Fact]
@@ -31,7 +31,7 @@ public class CardLibraryDecisionTests
         // old card's games beside the new card's capacity.
         Assert.Equal(
             CardLibraryAction.Replace,
-            CardLibraryDecision.Decide("777", ["222"]));
+            CardVolumeMonitor.Decide("777", ["222"]));
     }
 
     [Fact]
@@ -41,7 +41,7 @@ public class CardLibraryDecisionTests
         // identity, so the correct entry surviving next to a phantom is still wrong.
         Assert.Equal(
             CardLibraryAction.Replace,
-            CardLibraryDecision.Decide("777", ["222", "777"]));
+            CardVolumeMonitor.Decide("777", ["222", "777"]));
     }
 
     [Fact]
@@ -49,7 +49,7 @@ public class CardLibraryDecisionTests
     {
         Assert.Equal(
             CardLibraryAction.Purge,
-            CardLibraryDecision.Decide(null, ["222"]));
+            CardVolumeMonitor.Decide(null, ["222"]));
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public class CardLibraryDecisionTests
     {
         Assert.Equal(
             CardLibraryAction.None,
-            CardLibraryDecision.Decide(null, []));
+            CardVolumeMonitor.Decide(null, []));
     }
 
     [Theory]
@@ -67,7 +67,7 @@ public class CardLibraryDecisionTests
     {
         Assert.Equal(
             CardLibraryAction.Purge,
-            CardLibraryDecision.Decide(contentId, ["222"]));
+            CardVolumeMonitor.Decide(contentId, ["222"]));
     }
 
     [Fact]
@@ -75,7 +75,7 @@ public class CardLibraryDecisionTests
     {
         Assert.Equal(
             CardLibraryAction.Add,
-            CardLibraryDecision.Decide("777", ["", "  "]));
+            CardVolumeMonitor.Decide("777", ["", "  "]));
     }
 
     [Fact]
@@ -83,12 +83,12 @@ public class CardLibraryDecisionTests
     {
         Assert.Equal(
             CardLibraryAction.Replace,
-            CardLibraryDecision.Decide("777", ["7770"]));
+            CardVolumeMonitor.Decide("777", ["7770"]));
     }
 
     [Fact]
     public void ANullRegistrationListIsAProgrammingErrorNotAnEmptyOne()
     {
-        Assert.Throws<ArgumentNullException>(() => CardLibraryDecision.Decide("777", null!));
+        Assert.Throws<ArgumentNullException>(() => CardVolumeMonitor.Decide("777", null!));
     }
 }

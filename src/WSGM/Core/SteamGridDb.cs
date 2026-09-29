@@ -53,7 +53,7 @@ public sealed class SteamGridDbException : Exception
 public sealed record SgdbGame(int Id, string Name);
 
 /// <summary>Read-only client for the SteamGridDB v2 REST API: title search and per-slot
-/// asset listing, plus raw image download. NativeAOT-clean (HttpClient + JsonDocument).
+/// asset listing, plus raw image download. Uses only <see cref="HttpClient"/> and <see cref="JsonDocument"/>.
 /// Auth is a bearer key the user sets in Settings (<see cref="ResolveKey"/>); there is no
 /// bundled key (SteamGridDB rejects the decky public key). Applying the chosen image
 /// is <see cref="SteamArtwork"/>'s job; this class only fetches.</summary>
@@ -83,11 +83,6 @@ public static class SteamGridDb
     /// <param name="config">The loaded configuration.</param>
     public static string ResolveKey(AppConfig config)
         => (config.SteamGridDbApiKey ?? "").Trim();
-
-    /// <summary>Whether the user has set an API key (the feature can't run without one).</summary>
-    /// <param name="config">The loaded configuration.</param>
-    public static bool HasKey(AppConfig config)
-        => !string.IsNullOrWhiteSpace(config.SteamGridDbApiKey);
 
     /// <summary>Searches SteamGridDB for games by title (autocomplete).</summary>
     /// <param name="term">The search term.</param>
@@ -233,6 +228,10 @@ public static class SteamGridDb
         {
             throw;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             Log.Warn($"SteamGridDB image download failed ({url}): {ex.Message}");
@@ -267,6 +266,10 @@ public static class SteamGridDb
             return document.RootElement.Clone();
         }
         catch (SteamGridDbException)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }

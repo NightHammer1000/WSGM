@@ -34,7 +34,7 @@ public static class SteamCollections
             "return JSON.stringify({ok:true,collections:cols});}" +
             "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
 
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable || result.Value is null)
         {
@@ -91,7 +91,7 @@ public static class SteamCollections
         }
         var expression = "(()=>JSON.stringify({values:[" + string.Join(",", filterExpressions
             .Select(static value => "JSON.parse((" + value + "))")) + "]}))()";
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable || result.Value is null)
         {
@@ -168,7 +168,7 @@ public static class SteamCollections
             "return JSON.stringify({ok:true,apps:out});}" +
             "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
 
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable || result.Value is null)
         {
@@ -230,7 +230,7 @@ public static class SteamCollections
             "return JSON.stringify({ok:true,tags:out});}" +
             "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
 
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable || result.Value is null)
         {
@@ -267,49 +267,4 @@ public static class SteamCollections
         }
     }
 
-    /// <summary>Deletes the WSGM-owned collection with the given id, if it is still
-    /// a present user collection. Keyed by id, never name, so it can never remove a
-    /// user/SRM collection WSGM did not create. Returns whether the channel was
-    /// reachable (deleting a missing collection still counts as reachable success).</summary>
-    /// <param name="collectionId">The collection id WSGM created.</param>
-    /// <param name="cancellationToken">Cancels the exchange.</param>
-    public static async Task<bool> DeleteByIdAsync(
-        string collectionId, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(collectionId))
-        {
-            return true;
-        }
-        var idLiteral = SteamCef.JsString(collectionId);
-        var expression =
-            "(async()=>{try{const cs=collectionStore;const id=" + idLiteral + ";" +
-            "const col=cs.GetCollection(id);" +
-            "if(!col||!(cs.userCollections||[]).some(c=>c.id===col.id))" +
-            "return JSON.stringify({ok:true,deleted:false});" +
-            "const del=col.AsDeletableCollection&&col.AsDeletableCollection();" +
-            "if(del)await del.Delete();else if(typeof col.Delete==='function')await col.Delete();" +
-            "else await cs.DeleteCollection(col);" +
-            "return JSON.stringify({ok:true,deleted:true});}" +
-            "catch(e){return JSON.stringify({ok:false,err:String((e&&e.message)||e)});}})()";
-
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
-            .ConfigureAwait(false);
-        if (!result.Reachable || result.Value is null)
-        {
-            return false;
-        }
-        try
-        {
-            using var document = JsonDocument.Parse(result.Value);
-            return document.RootElement.TryGetProperty("ok", out var ok)
-                && ok.ValueKind == JsonValueKind.True;
-        }
-        catch (Exception ex)
-        {
-            // Returning false keeps the stale CollectionId, so the one-time legacy
-            // cleanup retries on every sync — log the reason or that loop is invisible.
-            Log.Warn($"Steam collection delete parse failed for {collectionId}: {ex.Message}");
-            return false;
-        }
-    }
 }

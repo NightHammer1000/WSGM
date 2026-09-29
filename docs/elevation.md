@@ -9,14 +9,27 @@ waiting to happen.
    `SeTcbPrivilege`); the working mechanism is a one-shot scheduled task (`InteractiveToken`, no
    RunLevel, task XML **must be UTF-16**, never ship `/NoUACCheck` — EDRs flag it). Win11 explorer
    usually de-elevates itself; `ExplorerControl` verifies 5 s after start and repairs once via the
-   task. Modern Settings activation uses this same task to run a narrow WSGM one-shot at medium
-   integrity before opening `ms-settings:`. The shell is normally elevated, and relying on
-   `ShellExecute` directly only works while unelevated Explorer happens to broker the request; never
-   start Explorer just to open Bluetooth or Wi-Fi Settings. `WSGM.Launch.exe` is the user-facing
-   extension of the same mechanism for Steam games that reject elevation. It is the **single**
-   launch wrapper: it replaced `WSGM.Deelevate.exe` and `steam-input-lease.exe`, which the installer
-   now deletes on update, so anyone who had pasted one of the old commands must re-apply the fix
-   (call this out in the release notes). Behaviours are selected by flag:
+   task on blocking terminal recovery paths. That route is valid for ordinary one-shot processes and
+   for a fail-open desktop, but it is not normal transition success: Explorer inherits the Task
+   Scheduler launch owner's job and desktop launchers such as Mod Organizer 2 can then fail
+   `CREATE_BREAKAWAY_FROM_JOB` with error 5. Normal game-to-desktop transitions instead use the
+   medium/jobless fixed-purpose shell anchor captured from the original canonical taskbar owner;
+   they verify the resulting taskbar owner is current-session, medium, canonical, jobless, and
+   stable. Scheduler fallback is always logged and surfaced as degraded, even if a later observation
+   happens to report the resulting Explorer as jobless. That recovery fallback gives task creation,
+   dispatch, deletion, and shell-readiness observation one shared absolute deadline; cancellation or
+   a process-wait fault stops an active `schtasks`, an uncertain task creation is cleanup-eligible
+   while budget remains, and best-effort cleanup never receives a fresh timeout. Once `/Run` begins,
+   a timeout or fault is an unknown dispatch rather than a proved failure; shell recovery must keep
+   game-mode surfaces retired while a late Explorer may still appear. Modern Settings activation
+   uses this same scheduled task to run a narrow WSGM one-shot at medium integrity before opening
+   `ms-settings:`. The shell is normally elevated, and relying on `ShellExecute` directly only works
+   while unelevated Explorer happens to broker the request; never start Explorer just to open
+   Bluetooth or Wi-Fi Settings. `WSGM.Launch.exe` is the user-facing extension of the same mechanism
+   for Steam games that reject elevation. It is the **single** launch wrapper: it replaced
+   `WSGM.Deelevate.exe` and `steam-input-lease.exe`, which the installer now deletes on update, so
+   anyone who had pasted one of the old commands must re-apply the fix (call this out in the release
+   notes). Behaviours are selected by flag:
    `"...\WSGM.Launch.exe" [--deelevate] [--input-lease | --input-lease-inject] -- %command%`, at
    least one required, the target command always after `--`. **The two lease flags differ only in
    delivery and are mutually exclusive.** `--input-lease` connects to the resident shim and NEVER
@@ -75,3 +88,25 @@ waiting to happen.
      **Target**, the real program in **Launch Arguments**. Never reintroduce `CurrentUserOnly` on an
      elevated↔medium pipe, and never make the wrapper WinExe. `Core\SteamLaunchConfig.cs` writes (d)
      into the running client so the user never has to; see invariant 11.
+
+## Steam client launch integrity
+
+WSGM starts Steam at its own integrity by default, which means elevated in a normal shell session.
+That is deliberate: WSGM drives the running client over CEF and sends it window messages, and a
+mismatched pair loses those messages to UIPI. The cost is that every game Steam launches inherits
+the elevation.
+
+`AppConfig.SteamLaunchUnelevated` is the user-owned choice between the two. When it is set and WSGM
+is elevated, the cold start goes through the same de-elevating scheduled task Explorer uses
+(`UnelevatedLauncher`), so the whole client — not an individual game — runs at medium integrity.
+From an unelevated WSGM the setting changes nothing, because the ordinary launch already produces a
+medium-integrity Steam.
+
+Both the cold start and the auto-relaunch after Steam exits pass through
+`SessionModes.StartBigPicture`, so the choice cannot apply to one and not the other. The selected
+integrity is logged on every launch (`Steam launch integrity: …`), including when de-elevation was
+requested but unavailable, so a pasted log settles which one actually happened. The scheduled-task
+route returns no process handle, so the Steam Input shim startup-trace line is only logged for the
+integrity-matched path that has one.
+
+`WSGM.Launch` is unaffected and keeps de-elevating individual games independently.

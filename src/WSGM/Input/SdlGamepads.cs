@@ -74,23 +74,6 @@ internal static unsafe class SdlGamepads
         (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_MISC2, GamepadButtons.RightPadPress),
     ];
 
-    /// <summary>True when a pad with back paddles (Steam Deck class) is connected,
-    /// so L4/L5/R4/R5/Steam/QAM are worth offering in the chord recorder UI.</summary>
-    public static bool HasDeckButtons
-    {
-        get
-        {
-            foreach (var pad in Pads.Values)
-            {
-                if (SDL_GamepadHasButton((SDL_Gamepad*)pad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_PADDLE1))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-    }
-
     /// <summary>Initializes SDL's gamepad subsystem once for the process.</summary>
     public static void EnsureInitialized()
     {

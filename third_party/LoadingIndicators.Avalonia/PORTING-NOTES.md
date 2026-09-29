@@ -10,7 +10,7 @@ WSGM previously consumed the `LoadingIndicators.Avalonia` NuGet package
 (11.0.11.1, last published July 2024). That package has no build for Avalonia 12,
 and the failure is not cosmetic: its **precompiled** XAML binds through
 `Avalonia.Markup.Xaml.MarkupExtensions.CompiledBindings.CompiledBindingPathBuilder`,
-a type Avalonia 12 removed. The NativeAOT compiler reports it plainly:
+a type Avalonia 12 removed. The publish failure identified the missing type directly:
 
 ```
 ILC: Method '[LoadingIndicators.Avalonia]CompiledAvaloniaXaml.!AvaloniaResources
@@ -24,36 +24,30 @@ why the app still *started* fine and only the boot splash would have broken. The
 boot splash is the cover that hides the desktop at sign-in, so that is the worst
 possible place to discover it.
 
-Building the XAML here compiles it against the Avalonia version WSGM actually
-ships, so the styles are correct by construction and a future Avalonia breaking
-change fails the build instead of the splash.
+WSGM compiles the two C# files and all AXAML resources directly into its own
+assembly. This compiles the styles against the Avalonia version WSGM actually
+ships, removes a one-consumer project and assembly, and makes a future Avalonia
+breaking change fail the WSGM build instead of the splash.
 
 ## Changes from upstream
 
-Only the project file. No `.axaml` and no `.cs` file has been modified — the
-upstream XAML compiles unchanged under Avalonia 12's XAML compiler.
+No `.axaml` file has been modified; upstream XAML compiles unchanged under
+Avalonia 12's XAML compiler. The C# source carries only the explicit system
+usings required by WSGM and scoped documentation/code-style pragmas because
+WSGM enforces those rules on its own production code while retaining the
+vendored upstream public surface and formatting unchanged.
 
-`LoadingIndicators.Avalonia/LoadingIndicators.Avalonia.csproj`:
+`src/WSGM/WSGM.csproj`:
 
-- `TargetFrameworks` `net8.0;net7.0;net6.0` → `TargetFramework` `net10.0`, to match WSGM.
-- `Avalonia` `11.0.*` → pinned `12.1.1`, the exact version WSGM ships. A floating
-  range here is what allowed the original mismatch.
-- Dropped all packaging metadata (`GeneratePackageOnBuild`, `PackageId`, icon,
-  readme, release-notes target). This is consumed as a project reference and is
-  never packed, and the release-notes target reads a file outside this directory.
-- Dropped the `**\*.xaml.cs` `DependentUpon` item and the `Assets\**` resource
-  glob: neither matches anything in this tree.
-- `AvaloniaResource` glob `**\*.xaml` → `**\*.axaml`, which is what the files in
-  this tree are actually called. (Avalonia's own SDK targets also auto-include
-  `**/*.axaml`, so this is belt-and-braces rather than the thing that was
-  broken.)
-- `GenerateDocumentationFile=false`, `NoWarn=CS1591;CS1573`,
-  `EnforceCodeStyleInBuild=false`: WSGM builds with warnings as errors and
-  requires XML docs on public APIs. Those are WSGM's rules for WSGM's code, not
-  something to impose on third-party source we want to keep diffable.
+- Links both C# files into the application compile.
+- Links all AXAML under `ThirdParty/LoadingIndicators`, preserving the relative
+  theme includes.
+- Uses WSGM's pinned Avalonia `12.1.1` package directly.
+- Keeps the Unlicense copy beside `WSGM.exe` through
+  `src/WSGM/Licenses/LoadingIndicators.Avalonia-UNLICENSE.txt`.
 
 ## Re-syncing
 
-Re-clone upstream, then re-apply the project-file changes above. Because no
-source file is patched, a re-sync is a straight copy of everything except the
-`.csproj`.
+Re-clone upstream, copy the AXAML files unchanged, and re-apply the explicit
+system usings plus scoped warning pragmas to the C# files. There is deliberately
+no project file in this vendored tree.

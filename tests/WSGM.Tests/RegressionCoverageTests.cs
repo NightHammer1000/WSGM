@@ -44,7 +44,7 @@ public sealed class RegressionCoverageTests
     [Fact]
     public void WindowEntryPreservesTheActivationTargetAndPresentationState()
     {
-        var entry = new TaskbarEntry((nint)123, "Steam", isSteam: true, icon: null);
+        var entry = new AppSwitcherEntry((nint)123, "Steam", isSteam: true, icon: null);
 
         Assert.Equal((nint)123, entry.Hwnd);
         Assert.Equal("Steam", entry.Title);
@@ -68,7 +68,7 @@ public sealed class RegressionCoverageTests
             WindowFinder.PassesSwitchableFilter(isVisible, isShellWindow, exStyle, isOwnProcess, cloaked, titleLength));
 
     [Fact]
-    public void WindowSnapshotCarriesTheMinimizedStateForTaskbarPresentation()
+    public void WindowSnapshotCarriesTheMinimizedStateForSwitcherPresentation()
     {
         var window = new WindowFinder.AppWindow((nint)456, "Game", 789) { IsMinimized = true };
 

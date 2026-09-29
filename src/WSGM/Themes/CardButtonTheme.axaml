@@ -1,13 +1,11 @@
 <!-- ControlTheme + state styles for the shared CardButton control (icon,
-     title, description, trailing text). The visuals are the established
-     quick-row look: MinHeight 44 card with a 2 px border that flips to the
-     accent color on focus (the device-proven border-based focus visual —
-     FocusAdorner stays null), plus the primary/danger style classes.
-     Accent-family tokens are consumed via DynamicResource (runtime accent
-     pipeline); everything else StaticResource. The state styles live at the
-     Styles root (not inside the ControlTheme) so they carry regular style
-     priority and can override the typography classes used by the template,
-     mirroring the previous Window.Styles quick-row rules. -->
+     title, description, trailing text): a MinHeight 52 card, borderless at rest,
+     whose 2 px border flips to the accent color on focus while the surface
+     lightens (the device-proven border-based focus visual — FocusAdorner stays
+     null), plus the primary/danger/tile style classes. Accent-family tokens are consumed via DynamicResource (runtime
+     accent pipeline); everything else StaticResource. The state styles live at
+     the Styles root (not inside the ControlTheme) so they carry regular style
+     priority and can override the typography classes used by the template. -->
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:c="using:WSGM.Controls">
@@ -19,11 +17,13 @@
 
             <ControlTheme x:Key="{x:Type c:CardButton}" TargetType="c:CardButton">
                 <Setter Property="Background" Value="{StaticResource HcCardBrush}" />
-                <Setter Property="BorderBrush" Value="{StaticResource HcCardBorderBrush}" />
+                <!-- Transparent at rest: the surface alone defines the card, and the
+                     constant thickness keeps focus from moving geometry. -->
+                <Setter Property="BorderBrush" Value="Transparent" />
                 <Setter Property="BorderThickness" Value="2" />
-                <Setter Property="CornerRadius" Value="4" />
-                <Setter Property="MinHeight" Value="44" />
-                <Setter Property="Padding" Value="10,6" />
+                <Setter Property="CornerRadius" Value="10" />
+                <Setter Property="MinHeight" Value="52" />
+                <Setter Property="Padding" Value="14,8" />
                 <Setter Property="HorizontalAlignment" Value="Stretch" />
                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                 <Setter Property="Foreground" Value="{StaticResource HcTextPrimaryBrush}" />
@@ -36,7 +36,7 @@
                                 BorderThickness="{TemplateBinding BorderThickness}"
                                 CornerRadius="{TemplateBinding CornerRadius}"
                                 Padding="{TemplateBinding Padding}">
-                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
+                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
                                 <!-- Fixed 20x20 slot so every row's title starts at
                                      the same x, with the glyph CENTERED inside it:
                                      Avalonia scales a Uniform geometry and then
@@ -46,6 +46,15 @@
                                      same uniform scale as the old fixed size while
                                      letting the box hug the drawn glyph, which is
                                      what makes the alignments apply. -->
+                                <!-- A live color swatch (an RGB zone's current color) takes
+                                     the icon slot; callers null the icon when they set it. -->
+                                <Border Name="PART_Swatch"
+                                        Width="20"
+                                        Height="20"
+                                        CornerRadius="6"
+                                        VerticalAlignment="Center"
+                                        Background="{TemplateBinding SwatchBrush}"
+                                        IsVisible="{TemplateBinding SwatchBrush, Converter={x:Static ObjectConverters.IsNotNull}}" />
                                 <Panel Width="20"
                                        Height="20"
                                        VerticalAlignment="Center"
@@ -81,11 +90,33 @@
                                              VerticalAlignment="Center"
                                              Fill="{TemplateBinding StatusBrush}"
                                              IsVisible="{TemplateBinding StatusBrush, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                                    <Path Name="PART_Pin"
+                                          Width="16"
+                                          Height="16"
+                                          Data="{x:Static c:Icons.Pin}"
+                                          Stretch="Uniform"
+                                          Stroke="{TemplateBinding Foreground}"
+                                          StrokeThickness="1.8"
+                                          StrokeLineCap="Round"
+                                          StrokeJoin="Round"
+                                          VerticalAlignment="Center"
+                                          IsVisible="{TemplateBinding IsPinned}" />
+                                    <!-- The device's own glyph when one resolved, otherwise the
+                                         letter. Both bind the same trailing slot, and exactly one
+                                         is visible, so a Claw shows its printed button and a
+                                         machine with no glyph profile still shows something. -->
+                                    <c:PhysicalGlyphImage Name="PART_TrailingGlyph"
+                                                          Width="18"
+                                                          Height="18"
+                                                          VerticalAlignment="Center"
+                                                          Foreground="{TemplateBinding Foreground}"
+                                                          Plan="{TemplateBinding TrailingGlyph}"
+                                                          IsVisible="{TemplateBinding TrailingGlyph, Converter={x:Static ObjectConverters.IsNotNull}}" />
                                     <TextBlock Name="PART_Trailing"
                                                FontWeight="SemiBold"
                                                VerticalAlignment="Center"
                                                Text="{TemplateBinding TrailingText}"
-                                               IsVisible="{TemplateBinding TrailingText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                                               IsVisible="{TemplateBinding ShowTrailingText}" />
                                 </StackPanel>
                             </Grid>
                         </Border>
@@ -105,6 +136,16 @@
     </Style>
     <Style Selector="c|CardButton:focus">
         <Setter Property="BorderBrush" Value="{DynamicResource HcAccentBrush}" />
+        <Setter Property="Background" Value="{StaticResource HcCardHoverBrush}" />
+    </Style>
+    <!-- Descriptions sit back; the title and value carry the row. Declared before
+         the .primary description rule so accent cards keep their darker caption. -->
+    <Style Selector="c|CardButton /template/ TextBlock#PART_Description">
+        <Setter Property="Foreground" Value="{StaticResource HcTextMutedBrush}" />
+    </Style>
+    <Style Selector="c|CardButton /template/ TextBlock#PART_Trailing">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{StaticResource HcTextSecondaryBrush}" />
     </Style>
     <Style Selector="c|CardButton.primary">
         <Setter Property="Background" Value="{DynamicResource HcAccentBrush}" />
@@ -117,10 +158,121 @@
     <Style Selector="c|CardButton.primary /template/ TextBlock#PART_Description">
         <Setter Property="Foreground" Value="{DynamicResource HcOnAccentCaptionBrush}" />
     </Style>
+    <Style Selector="c|CardButton.primary /template/ TextBlock#PART_Trailing">
+        <Setter Property="Foreground" Value="{DynamicResource HcOnAccentBrush}" />
+    </Style>
+
+    <!-- Quick access tile: the pinned-grid variant of the same card — icon and pin
+         on top, title and caption in the middle, the live value pinned to the
+         bottom edge so the home tab doubles as a status glance. Every PART name
+         matches the base template so the primary/danger/pinned state styles apply
+         unchanged. -->
+    <Style Selector="c|CardButton.tile">
+        <Setter Property="Height" Value="120" />
+        <Setter Property="Padding" Value="14,12" />
+        <Setter Property="Template">
+            <ControlTemplate TargetType="c:CardButton">
+                <Border Name="PART_Root"
+                        Background="{TemplateBinding Background}"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}"
+                        CornerRadius="{TemplateBinding CornerRadius}"
+                        Padding="{TemplateBinding Padding}">
+                    <Grid RowDefinitions="Auto,*,Auto">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <Border Name="PART_Swatch"
+                                    Width="22"
+                                    Height="22"
+                                    CornerRadius="6"
+                                    HorizontalAlignment="Left"
+                                    VerticalAlignment="Center"
+                                    Background="{TemplateBinding SwatchBrush}"
+                                    IsVisible="{TemplateBinding SwatchBrush, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                            <Panel Width="22"
+                                   Height="22"
+                                   HorizontalAlignment="Left"
+                                   IsVisible="{TemplateBinding IconGeometry, Converter={x:Static ObjectConverters.IsNotNull}}">
+                                <Path Name="PART_Icon"
+                                      MaxWidth="22"
+                                      MaxHeight="22"
+                                      Data="{TemplateBinding IconGeometry}"
+                                      Stretch="Uniform"
+                                      Stroke="{TemplateBinding Foreground}"
+                                      StrokeThickness="1.8"
+                                      StrokeLineCap="Round"
+                                      StrokeJoin="Round"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center" />
+                            </Panel>
+                            <Path Name="PART_Pin"
+                                  Grid.Column="2"
+                                  Width="14"
+                                  Height="14"
+                                  Data="{x:Static c:Icons.Pin}"
+                                  Stretch="Uniform"
+                                  Stroke="{TemplateBinding Foreground}"
+                                  StrokeThickness="1.8"
+                                  StrokeLineCap="Round"
+                                  StrokeJoin="Round"
+                                  VerticalAlignment="Top"
+                                  IsVisible="{TemplateBinding IsPinned}" />
+                        </Grid>
+                        <StackPanel Grid.Row="1" Spacing="2" Margin="0,8,0,4" VerticalAlignment="Top">
+                            <TextBlock Name="PART_Title"
+                                       Classes="setting-title"
+                                       TextTrimming="CharacterEllipsis"
+                                       Text="{TemplateBinding Title}" />
+                            <TextBlock Name="PART_Description"
+                                       Classes="caption"
+                                       MaxLines="2"
+                                       TextTrimming="CharacterEllipsis"
+                                       Text="{TemplateBinding Description}"
+                                       IsVisible="{TemplateBinding Description, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                        </StackPanel>
+                        <Grid Grid.Row="2" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <c:PhysicalGlyphImage Name="PART_TrailingGlyph"
+                                                      Width="18"
+                                                      Height="18"
+                                                      VerticalAlignment="Center"
+                                                      Foreground="{TemplateBinding Foreground}"
+                                                      Plan="{TemplateBinding TrailingGlyph}"
+                                                      IsVisible="{TemplateBinding TrailingGlyph, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                                <TextBlock Name="PART_Trailing"
+                                           FontWeight="SemiBold"
+                                           VerticalAlignment="Center"
+                                           Text="{TemplateBinding TrailingText}"
+                                           IsVisible="{TemplateBinding ShowTrailingText}" />
+                            </StackPanel>
+                            <Ellipse Name="PART_StatusDot"
+                                     Grid.Column="1"
+                                     Width="10"
+                                     Height="10"
+                                     VerticalAlignment="Center"
+                                     Fill="{TemplateBinding StatusBrush}"
+                                     IsVisible="{TemplateBinding StatusBrush, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                        </Grid>
+                    </Grid>
+                </Border>
+            </ControlTemplate>
+        </Setter>
+    </Style>
     <Style Selector="c|CardButton.danger /template/ TextBlock#PART_Title">
         <Setter Property="Foreground" Value="{StaticResource HcDangerBrush}" />
     </Style>
     <Style Selector="c|CardButton.danger /template/ Path#PART_Icon">
         <Setter Property="Stroke" Value="{StaticResource HcDangerBrush}" />
+    </Style>
+
+    <!-- The empty-slot affordance on the Quick access grid: surface-less, muted,
+         never enabled (an Avalonia Border cannot draw the mock's dashes, so the
+         resting card border stands in). -->
+    <Style Selector="c|CardButton.ghost">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="{StaticResource HcCardBorderBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource HcTextMutedBrush}" />
+    </Style>
+    <Style Selector="c|CardButton.ghost /template/ TextBlock#PART_Title">
+        <Setter Property="Foreground" Value="{StaticResource HcTextMutedBrush}" />
     </Style>
 </Styles>

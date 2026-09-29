@@ -10,7 +10,7 @@ namespace WSGM.Shell;
 public sealed class SteamMonitor : IDisposable
 {
     private readonly DispatcherTimer _timer;
-    private readonly AliveEdgeDetector _edge = new();
+    private bool _wasAlive;
 
     /// <summary>Raised when Steam transitions from alive to absent while monitoring is active.</summary>
     public event Action? SteamExited;
@@ -74,9 +74,11 @@ public sealed class SteamMonitor : IDisposable
         _pollInFlight = false;
         IsAlive = alive;
 
-        // The detector only fires after a poll saw Steam alive, so the
+        // _wasAlive can only be true after a poll saw Steam alive, so the
         // seen-alive-once requirement is implied.
-        if (_edge.Update(IsAlive))
+        var exited = _wasAlive && !IsAlive;
+        _wasAlive = IsAlive;
+        if (exited)
         {
             if (Paused)
             {

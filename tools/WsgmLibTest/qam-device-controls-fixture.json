@@ -1,0 +1,77 @@
+{
+  "wsgm.native-qam.audio": {
+    "available": true,
+    "devices": [
+      {
+        "id": "speakers",
+        "name": "Speakers",
+        "hasOutput": true,
+        "hasInput": false
+      },
+      {
+        "id": "microphone",
+        "name": "Microphone",
+        "hasOutput": false,
+        "hasInput": true
+      }
+    ],
+    "activeOutputDeviceId": "speakers",
+    "activeInputDeviceId": "microphone",
+    "volumePercent": 42,
+    "muted": false,
+    "inputVolumePercent": 67,
+    "inputMuted": false,
+    "statusText": ""
+  },
+  "wsgm.native-qam.device-controls": {
+    "chargeLimit": {
+      "available": true,
+      "minimum": 60,
+      "maximum": 100,
+      "step": 1,
+      "desired": 80,
+      "observed": 80,
+      "progress": "",
+      "statusText": ""
+    },
+    "lightingBrightness": {
+      "available": true,
+      "minimum": 0,
+      "maximum": 100,
+      "step": 1,
+      "desired": 60,
+      "observed": 60,
+      "progress": "",
+      "statusText": ""
+    },
+    "lightingZones": [
+      {
+        "id": "right-ring",
+        "label": "Right ring",
+        "available": true,
+        "desiredColor": 16744448,
+        "observedColor": 16744448,
+        "progress": "",
+        "statusText": ""
+      },
+      {
+        "id": "left-ring",
+        "label": "Left ring",
+        "available": true,
+        "desiredColor": 33023,
+        "observedColor": 33023,
+        "progress": "",
+        "statusText": ""
+      },
+      {
+        "id": "buttons",
+        "label": "Buttons",
+        "available": true,
+        "desiredColor": 8388863,
+        "observedColor": 8388863,
+        "progress": "",
+        "statusText": ""
+      }
+    ]
+  }
+}

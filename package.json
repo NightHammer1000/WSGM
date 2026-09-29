@@ -2,9 +2,14 @@
   "private": true,
   "scripts": {
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "steam-assets:build": "node eng/build-steam-assets.mjs",
+    "steam-assets:check": "node eng/build-steam-assets.mjs --check",
+    "steam-assets:claims": "node external/steam-ui-toolkit/eng/check-ownership-claims.mjs src/WSGM/Core/SteamUiAssets/NativeQamBootstrap.js"
   },
   "devDependencies": {
-    "prettier": "3.9.6"
+    "chrome-devtools-mcp": "1.8.0",
+    "prettier": "3.9.6",
+    "typescript": "7.0.2"
   }
 }

@@ -24,9 +24,6 @@ public partial class KeyboardWindow : Window
     /// <summary>Raised with the final text when the user accepts.</summary>
     public event Action<string>? Accepted;
 
-    /// <summary>Raised when the window closes without accepting.</summary>
-    public event Action? Cancelled;
-
     /// <summary>Design-time constructor for the XAML loader.</summary>
     public KeyboardWindow()
         : this("Enter text", "", 256, 1.0)
@@ -48,7 +45,7 @@ public partial class KeyboardWindow : Window
         Keyboard.Target = Input;
         Keyboard.Accepted += (_, _) => Commit();
         Keyboard.PasteRequested += OnPasteRequested;
-        Win32Properties.AddWndProcHookCallback(this, WndProcHook);
+        Win32Properties.AddWndProcHookCallback(this, NativeMethods.SwallowTouchSynthesizedMouse);
 
         Opened += (_, _) =>
         {
@@ -56,18 +53,11 @@ public partial class KeyboardWindow : Window
             Input.CaretIndex = Input.Text?.Length ?? 0;
             FocusDefault();
         };
-        Closed += (_, _) =>
-        {
-            if (!_committed)
-            {
-                Cancelled?.Invoke();
-            }
-        };
     }
 
     private void ApplyScale()
     {
-        var factor = Math.Clamp(_uiScale / DesktopScaling, 1.0, 3.0);
+        var factor = Math.Clamp(_uiScale / StatusPanel.CurrentWindowScale(this), 1.0, 3.0);
         if (Math.Abs(factor - 1.0) >= 0.01)
         {
             RootScale.LayoutTransform = new ScaleTransform(factor, factor);
@@ -120,20 +110,6 @@ public partial class KeyboardWindow : Window
         DispatcherTimer.RunOnce(Close, TimeSpan.FromMilliseconds(150));
     }
 
-    private static IntPtr WndProcHook(
-        IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, ref bool handled)
-    {
-        if (msg is NativeMethods.WmMouseMove or NativeMethods.WmLButtonDown or NativeMethods.WmLButtonUp)
-        {
-            var extra = (uint)NativeMethods.GetMessageExtraInfo();
-            if ((extra & NativeMethods.MiWpSignatureMask) == NativeMethods.MiWpSignature)
-            {
-                handled = true;
-                return IntPtr.Zero;
-            }
-        }
-        return IntPtr.Zero;
-    }
 
     /// <summary>Focuses the first key so the user can start typing immediately (used on
     /// open and when gamepad focus crosses in from the sidebar).</summary>

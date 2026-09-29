@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -10,16 +10,13 @@
     <ApplicationIcon>Assets\wsgm.ico</ApplicationIcon>
     <AssemblyName>WSGM</AssemblyName>
     <RootNamespace>WSGM</RootNamespace>
-    <Version>1.5.1</Version>
+    <Version>2.0.0</Version>
 
-    <!-- NativeAOT single exe -->
-    <PublishAot>true</PublishAot>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Self-contained JIT publish. The resident process loads the sole installed
+         device plugin directly and uses managed Windows APIs where possible. -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
     <UseSystemResourceKeys>true</UseSystemResourceKeys>
-    <!-- Managed COM interop stays off: nothing here needs it (the radio and volume
-         helpers own their COM/WinRT calls behind a flat C ABI), and leaving it off
-         keeps the NativeAOT image smaller. Avalonia only required this before 12.0. -->
-    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
 
     <!-- A resident shell on an 8-16 GB handheld: favor small heap over GC
          throughput (no background GC thread; see also ConserveMemory below). -->
@@ -29,10 +26,32 @@
   </PropertyGroup>
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
+    <!-- LoadingIndicators remains diffable vendored source, but is compiled into
+         WSGM instead of producing a one-consumer assembly. Link fixes its avares
+         path inside this assembly while preserving the relative theme includes
+         and the LoadingIndicators.Avalonia namespace. -->
+    <AvaloniaResource
+        Include="..\..\third_party\LoadingIndicators.Avalonia\LoadingIndicators.Avalonia\**\*.axaml"
+        Link="ThirdParty\LoadingIndicators\%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Core\SteamUiAssets\*.js"
+                      LogicalName="WSGM.Core.SteamUiAssets.%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile
+        Include="..\..\third_party\LoadingIndicators.Avalonia\LoadingIndicators.Avalonia\LoadingIndicator.cs"
+        Link="ThirdParty\LoadingIndicators\LoadingIndicator.cs" />
+    <Compile
+        Include="..\..\third_party\LoadingIndicators.Avalonia\LoadingIndicators.Avalonia\LoadingIndicatorMode.cs"
+        Link="ThirdParty\LoadingIndicators\LoadingIndicatorMode.cs" />
+    <!-- The in-repo Steam Input binding is the single managed ABI source. Both
+         WSGM and WSGM.Launch compile it directly; there is no application mirror. -->
+    <Compile
+        Include="..\..\native\SteamInput\bindings\SteamInterop.Net\*.cs"
+        LinkBase="SteamInterop" />
   </ItemGroup>
   <ItemGroup>
     <!-- Steam Input Lease injects this gate into steam.exe while a WSGM input
-         surface owns a lease. Keep both x64 native libraries beside the AOT
+         surface owns a lease. Keep both x64 native libraries beside the application
          executable; the managed binding resolves them by their file names. -->
     <None Include="Native\SteamInputLease\*.dll"
           Condition="'$(SkipNativeArtifacts)' != 'true'"
@@ -40,8 +59,8 @@
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
     <!-- steam-input-lease.exe is deliberately NOT shipped: WSGM.Launch.exe is the
-         single user-facing wrapper and links the same binding mirror, so it holds
-         the lease itself (and carries the CLI's status/rescan diagnostics).
+         single user-facing wrapper and links the canonical binding source, so it
+         holds the lease itself and carries the CLI's status/rescan diagnostics.
          The Rust CLI stays a development tool inside native\SteamInput. -->
     <None Include="Native\SteamInputLease\*.txt"
           Condition="'$(SkipNativeArtifacts)' != 'true'"
@@ -53,13 +72,13 @@
           Link="%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
-    <!-- Wi-Fi and Bluetooth control. WinRT radio power and custom pairing cannot
-         be reached from this NativeAOT executable at all (managed COM interop is
-         off), so the helper owns those calls and the flat wlanapi ones behind a
-         C ABI. The probe beside it answers, on the device, what documentation
-         does not: whether radio control works with no shell, and whether the
-         location-consent gate blocks the Wi-Fi scan. -->
-    <None Include="Native\Radio\*"
+    <!-- Virtual controller targets. VIIPER presents a virtual USB device in
+         userspace over usbip-win2's generic signed kernel driver, so WSGM ships
+         no driver of its own and needs no kernel code per controller type. Its
+         flat C ABI keeps the virtual-device implementation native.
+         Staged by eng\build-viiper.ps1 from a pinned external revision. Compile-only
+         workflows may omit it; build.ps1 requires it before producing an installer. -->
+    <None Include="Native\Viiper\*"
           Link="%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
@@ -70,19 +89,36 @@
           Link="%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
+    <!-- WSGM is GPL-3.0-or-later. Ship the repository's authoritative license
+         as part of every core output instead of maintaining a second copy. -->
+    <None Include="..\..\LICENSE"
+          Link="LICENSE.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Boot-splash spinner styles (Unlicense; the license text ships from
-         Licenses\ beside the exe). Vendored as SOURCE, not as the NuGet package:
-         the published package is built against Avalonia 11 and its precompiled
-         XAML throws on Avalonia 12. Building it here compiles the styles against
-         the Avalonia we ship. See its csproj for the full reasoning. -->
+    <!-- Plugins are loaded dynamically; the shared SDK preserves type identity
+         without making the installed package a production project reference. -->
     <ProjectReference
-        Include="..\..\third_party\LoadingIndicators.Avalonia\LoadingIndicators.Avalonia\LoadingIndicators.Avalonia.csproj" />
+        Include="..\..\external\WSGM.Device.Sdk\src\WSGM.Device.Sdk\WSGM.Device.Sdk.csproj" />
+    <!-- Wi-Fi, Bluetooth, audio endpoint and panel brightness control. Extracted to its own
+         repository because nothing in it is specific to WSGM or to gaming; it is pinned as a
+         submodule so this branch keeps a known-good revision while the library moves. -->
+    <ProjectReference
+        Include="..\..\external\windows-device-control\src\WindowsDeviceControl\WindowsDeviceControl.csproj" />
+    <!-- The CDP transport, patch lifecycle, bridge and module contract. WSGM keeps the surfaces:
+         the gates, the QAM rows and the components are its product, not the toolkit's. -->
+    <ProjectReference
+        Include="..\..\external\steam-ui-toolkit\src\SteamUiToolkit\SteamUiToolkit.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <!-- 1-9: how hard the GC works to keep the heap small; 9 = maximum. Reads
-         fine under NativeAOT (embedded runtime config). -->
+    <!-- Every Steam UI type used to live in WSGM.Core, and the patches and session host reference
+         them constantly. A global using keeps that one move from touching thirty files for no
+         behavioural reason. -->
+    <Using Include="SteamUiToolkit" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- 1-9: how hard the GC works to keep the heap small; 9 = maximum. -->
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="9" />
   </ItemGroup>
   <ItemGroup>
@@ -99,8 +135,7 @@
     <!-- Pinned: FluentAvaloniaUI's transitive ColorPicker can resolve below the
          Avalonia version above — the explicit pin removes the version skew. -->
     <PackageReference Include="Avalonia.Controls.ColorPicker" Version="12.1.1" />
-    <!-- Controller input. Plain-DllImport bindings (AOT-safe), bundles native SDL3.dll
-         for win-x64 so build and publish output pick it up automatically. -->
+    <!-- Controller input; bundles SDL3.dll for win-x64. -->
     <PackageReference Include="ppy.SDL3-CS" Version="2026.722.0" />
   </ItemGroup>
 </Project>

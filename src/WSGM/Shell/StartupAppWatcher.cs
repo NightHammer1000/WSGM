@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Threading;
 using WSGM.Core;
 
@@ -17,17 +19,21 @@ public sealed class StartupAppWatcher : IDisposable
 
     private sealed class WatchState
     {
-        public readonly AliveEdgeDetector Edge = new();
+        // Only true after a poll saw the process alive, so "seen alive once" before a
+        // relaunch is implied rather than tracked separately.
+        public bool WasAlive;
         public DateTime LastRelaunchUtc;
         public bool RelaunchPending;
     }
 
     private readonly DispatcherTimer _timer;
+    private readonly CancellationTokenSource _lifetime = new();
     private List<StartupAppConfig> _apps;
     // Keyed by full path so two configured apps sharing an exe basename don't
     // collide on one state.
     private readonly Dictionary<string, WatchState> _states = new(StringComparer.OrdinalIgnoreCase);
     private bool _pollInFlight;
+    private bool _disposed;
 
     /// <summary>Creates a watcher for the currently configured startup programs.</summary>
     /// <param name="apps">The startup-program configuration to monitor.</param>
@@ -47,7 +53,7 @@ public sealed class StartupAppWatcher : IDisposable
 
     private void Poll()
     {
-        if (_pollInFlight)
+        if (_disposed || _pollInFlight)
         {
             return;
         }
@@ -77,7 +83,8 @@ public sealed class StartupAppWatcher : IDisposable
         // thread, with only the resulting booleans marshalled back, so the 16 ms
         // gamepad poll and the overlay animations never wait on it. All watcher state
         // stays UI-thread owned in Apply.
-        _ = System.Threading.Tasks.Task.Run(() =>
+        CancellationToken lifetime = _lifetime.Token;
+        Log.Observe(Task.Run(() =>
         {
             var alive = new bool[probes.Count];
             for (var i = 0; i < probes.Count; i++)
@@ -94,8 +101,17 @@ public sealed class StartupAppWatcher : IDisposable
                     alive[i] = true;
                 }
             }
-            Dispatcher.UIThread.Post(() => Apply(probes, alive));
-        });
+            if (!lifetime.IsCancellationRequested)
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (!lifetime.IsCancellationRequested)
+                    {
+                        Apply(probes, alive);
+                    }
+                });
+            }
+        }, lifetime), "startup app liveness poll");
     }
 
     private void Apply(List<(string Path, string Name)> probes, bool[] alive)
@@ -110,10 +126,11 @@ public sealed class StartupAppWatcher : IDisposable
                 _states[path] = state;
             }
 
-            // Update() always records the new state, even while a relaunch is
-            // pending — only the reaction is gated, matching the old
-            // WasAlive bookkeeping.
-            if (state.Edge.Update(alive[i]) && !state.RelaunchPending)
+            // The new state is always recorded, even while a relaunch is pending —
+            // only the reaction is gated.
+            var exited = state.WasAlive && !alive[i];
+            state.WasAlive = alive[i];
+            if (exited && !state.RelaunchPending)
             {
                 // A falling edge inside the cooldown isn't dropped — the relaunch is
                 // scheduled for when the cooldown expires (never sooner than the
@@ -122,9 +139,34 @@ public sealed class StartupAppWatcher : IDisposable
                 var delay = remaining > RelaunchDelay ? remaining : RelaunchDelay;
                 state.RelaunchPending = true;
                 Log.Info($"Startup app '{name}' exited — relaunching in {delay.TotalSeconds:0} s.");
-                System.Threading.Tasks.Task.Delay(delay).ContinueWith(_ =>
-                    Dispatcher.UIThread.Post(() => Relaunch(path, name, state)));
+                Log.Observe(
+                    RelaunchAfterDelayAsync(path, name, state, delay, _lifetime.Token),
+                    $"startup app relaunch for {name}");
             }
+        }
+    }
+
+    private async Task RelaunchAfterDelayAsync(
+        string path,
+        string name,
+        WatchState state,
+        TimeSpan delay,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    // The state and current configuration remain UI-thread owned.
+                    Relaunch(path, name, state);
+                }
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
     }
 
@@ -145,5 +187,16 @@ public sealed class StartupAppWatcher : IDisposable
     }
 
     /// <summary>Stops periodic process monitoring.</summary>
-    public void Dispose() => _timer.Stop();
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _timer.Stop();
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
 }

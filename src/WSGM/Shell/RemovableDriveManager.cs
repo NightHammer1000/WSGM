@@ -196,6 +196,25 @@ public sealed class RemovableDriveManager : INotifyPropertyChanged, IDisposable
         : mediaRemovable ? EjectKind.Media
         : null;
 
+    /// <summary>Classifies one disk number on a fresh handle: null for a
+    /// system/app disk or anything that does not answer as external
+    /// hot-pluggable/removable storage. Query access only — a read handle on
+    /// <c>\\.\PhysicalDriveN</c> needs elevation, so this must work unelevated.</summary>
+    /// <param name="disk">The physical disk number.</param>
+    /// <param name="systemDisks">The guarded disks from <see cref="ResolveSystemDisks"/>.</param>
+    internal static EjectKind? ClassifyDisk(int disk, HashSet<int> systemDisks)
+    {
+        if (systemDisks.Contains(disk))
+        {
+            return null;
+        }
+        using var handle = NativeStorage.OpenDiskForQuery(disk);
+        return !handle.IsInvalid
+            && NativeStorage.TryGetHotplugInfo(handle, out var media, out var hotplug)
+            ? Classify(hotplug, media)
+            : null;
+    }
+
     /// <summary>Formats a capacity for the row's status line.</summary>
     /// <param name="bytes">The size in bytes; nothing is shown for 0.</param>
     internal static string FormatSize(long bytes)
@@ -229,34 +248,15 @@ public sealed class RemovableDriveManager : INotifyPropertyChanged, IDisposable
         // Candidate volumes: mounted local disks. USB HDDs report Fixed, so the
         // type never filters — only network/optical/absent drives are skipped.
         var volumes = new List<(char Letter, int Disk, long Size)>();
-        foreach (var drive in DriveInfo.GetDrives())
+        foreach (var volume in NativeStorage.MountedVolumes())
         {
-            try
+            if (!volume.Ready
+                || volume.DeviceType != NativeStorage.FileDeviceDisk
+                || volume.Disk < 0)
             {
-                if (drive.DriveType is not (DriveType.Fixed or DriveType.Removable)
-                    || !drive.IsReady)
-                {
-                    continue;
-                }
-                var letter = char.ToUpperInvariant(drive.Name[0]);
-                using var volume = NativeStorage.OpenVolumeForQuery(letter);
-                if (volume.IsInvalid
-                    || !NativeStorage.TryGetDeviceNumber(volume, out var type, out var disk)
-                    || type != NativeStorage.FileDeviceDisk
-                    || disk < 0)
-                {
-                    continue;
-                }
-                volumes.Add((letter, disk, drive.TotalSize));
+                continue;
             }
-            catch (IOException)
-            {
-                // Media left mid-walk; the next signature tick re-runs us.
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // A volume we may not even query is not one we can eject.
-            }
+            volumes.Add((volume.Letter, volume.Disk, volume.SizeBytes));
         }
         if (volumes.Count == 0)
         {
@@ -268,17 +268,7 @@ public sealed class RemovableDriveManager : INotifyPropertyChanged, IDisposable
         var kinds = new Dictionary<int, EjectKind>();
         foreach (var disk in volumes.Select(v => v.Disk).Distinct())
         {
-            if (_systemDisks.Contains(disk))
-            {
-                continue;
-            }
-            using var handle = NativeStorage.OpenDiskForQuery(disk);
-            if (handle.IsInvalid
-                || !NativeStorage.TryGetHotplugInfo(handle, out var media, out var hotplug))
-            {
-                continue;
-            }
-            if (Classify(hotplug, media) is { } kind)
+            if (ClassifyDisk(disk, _systemDisks) is { } kind)
             {
                 kinds[disk] = kind;
             }
@@ -483,6 +473,12 @@ public sealed class RemovableDriveManager : INotifyPropertyChanged, IDisposable
                 entry.ResultText = result.Message;
                 StatusText = result.Message;
             }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Log.Warn($"Eject: {entry.Name} failed unexpectedly: {ex.Message}");
+            entry.ResultText = "Eject failed";
+            StatusText = $"Could not eject {entry.Name}: {ex.Message}";
         }
         finally
         {

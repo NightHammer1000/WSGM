@@ -1,10 +1,28 @@
 <Solution>
+  <Folder Name="/external/">
+    <Project Path="external/steam-ui-toolkit/src/SteamUiToolkit/SteamUiToolkit.csproj" />
+    <Project Path="external/windows-device-control/src/WindowsDeviceControl/WindowsDeviceControl.csproj" />
+    <Project Path="external/WSGM.Device.Msi.Claw8A2Vm/src/WSGM.Device.Msi.Claw8A2Vm/WSGM.Device.Msi.Claw8A2Vm.csproj" />
+    <Project Path="external/WSGM.Device.Sdk/src/WSGM.Device.Sdk/WSGM.Device.Sdk.csproj" />
+    <Project Path="external/WSGM.DeviceLab/src/WSGM.DeviceLab/WSGM.DeviceLab.csproj" />
+  </Folder>
+  <Folder Name="/submodule-sdk-pins/claw/">
+    <Project Path="external/WSGM.Device.Msi.Claw8A2Vm/external/WSGM.Device.Sdk/src/WSGM.Device.Sdk/WSGM.Device.Sdk.csproj" />
+  </Folder>
+  <Folder Name="/submodule-sdk-pins/device-lab/">
+    <Project Path="external/WSGM.DeviceLab/external/WSGM.Device.Sdk/src/WSGM.Device.Sdk/WSGM.Device.Sdk.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/WSGM.Launch/WSGM.Launch.csproj" />
     <Project Path="src/WSGM.LogonService/WSGM.LogonService.csproj" />
     <Project Path="src/WSGM/WSGM.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="external/steam-ui-toolkit/tests/SteamUiToolkit.Tests/SteamUiToolkit.Tests.csproj" />
+    <Project Path="external/windows-device-control/tests/WindowsDeviceControl.Tests/WindowsDeviceControl.Tests.csproj" />
+    <Project Path="external/WSGM.Device.Msi.Claw8A2Vm/tests/WSGM.Device.Msi.Claw8A2Vm.Tests/WSGM.Device.Msi.Claw8A2Vm.Tests.csproj" />
+    <Project Path="external/WSGM.Device.Sdk/tests/WSGM.Device.Sdk.Tests/WSGM.Device.Sdk.Tests.csproj" />
+    <Project Path="external/WSGM.DeviceLab/tests/WSGM.DeviceLab.Tests/WSGM.DeviceLab.Tests.csproj" />
     <Project Path="tests/WSGM.Tests/WSGM.Tests.csproj" />
   </Folder>
 </Solution>

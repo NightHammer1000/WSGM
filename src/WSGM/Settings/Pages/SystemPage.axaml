@@ -5,9 +5,8 @@
              x:Class="WSGM.Settings.Pages.SystemPage"
              x:DataType="s:SettingsViewModel">
     <!-- Dense utility layout: hero shell-status row on top, then two columns of
-         zebra setting rows. XAML element order stays the monolith's order (it is
-         the controller tab order): hero → install → boot toggle → restore →
-         recovery → diagnostics. -->
+         zebra setting rows. XAML element order is the controller tab order:
+         hero → install → boot toggle → restore → recovery → diagnostics. -->
     <Border Padding="16,10,16,10">
         <Grid RowDefinitions="Auto,*">
             <Border Classes="hc-device-card">
@@ -34,15 +33,6 @@
                                 <TextBlock Text="The WSGM service covers the booting desktop and switches to Big Picture once Windows finishes signing you in. Programs Windows autostarts may briefly run at sign-in." Classes="caption" />
                             </StackPanel>
                             <ToggleSwitch Grid.Column="1" IsChecked="{Binding GameModeBootEnabled}" VerticalAlignment="Center" />
-                        </Grid>
-                    </Border>
-                    <Border Classes="setting-row alt" IsVisible="{Binding ShellInstalled}">
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                            <StackPanel VerticalAlignment="Center" Spacing="1">
-                                <TextBlock Text="Restore the previous shell" Classes="setting-title" />
-                                <TextBlock Text="An older WSGM registered itself as this account's shell. Restore the saved Explorer shell — game mode keeps working through the service." Classes="caption" />
-                            </StackPanel>
-                            <Button Grid.Column="1" Classes="danger" Content="Restore" Command="{Binding UninstallCommand}" VerticalAlignment="Center" />
                         </Grid>
                     </Border>
                 </StackPanel>

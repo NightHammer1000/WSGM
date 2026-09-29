@@ -1,0 +1,52 @@
+diff --git a/clib/main.go b/clib/main.go
+index f841a20..9ca64a8 100644
+--- a/clib/main.go
++++ b/clib/main.go
+@@ -486,33 +486,20 @@ func viiper_device_add(busID C.uint32_t, typeName *C.char, outDeviceID *C.uint32
+ 		*outDeviceID = C.uint32_t(devID)
+ 	}
+ 
+-	// Auto-attach the device via usbip-win2 so it appears in Windows.
+-	// Done synchronously (after releasing the mutex) so the device is fully
+-	// attached before the caller starts sending input.
+-	port := server.GetListenPort()
+-	if port > 0 {
+-		exportMeta := &usbip.ExportMeta{
+-			BusId: bid,
+-			DevId: devID,
+-		}
+-		logger := slog.Default()
+-
+-		// Release the mutex before the blocking attach call — the USBIP
+-		// server needs to handle the incoming connection.
+-		mu.Unlock()
+-		err = api.AttachLocalhostClient(context.Background(), exportMeta, port, true, logger)
+-		if err != nil {
+-			slog.Warn("auto-attach via IOCTL failed, trying usbip.exe", "error", err)
+-			err = api.AttachLocalhostClient(context.Background(), exportMeta, port, false, logger)
+-		}
+-		mu.Lock()
+-
+-		if err != nil {
+-			slog.Error("auto-attach failed", "error", err)
+-			// Device was added but attach failed — not a fatal error.
+-			// The caller can retry with viiper_device_attach.
+-		}
+-	}
++	// WSGM patch: viiper_device_add no longer attaches. Attaching is viiper_device_attach's job
++	// and the caller's decision.
++	//
++	// Upstream attached here as well, which made the pair add+attach produce TWO usbip
++	// attachments of the same device: two ports in `usbip port`, both pointing at the same
++	// bus/dev, and two identical controllers in Steam. Attach was documented here only as a
++	// retry ("the caller can retry with viiper_device_attach"), so a caller that follows the API
++	// literally gets a duplicate rather than a retry.
++	//
++	// It also made the ordering unachievable. A caller cannot present a neutral first frame
++	// before the host enumerates the device if adding it is what enumerates it: the host starts
++	// polling during add, before any input has been submitted, and reads whatever the device
++	// state happens to be. With attach explicit, the caller can open the fast handle, submit a
++	// neutral frame, and only then let Windows see the device.
+ 
+ 	return 0
+ }

@@ -1,3 +1,4 @@
+using System;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
@@ -16,6 +17,23 @@ namespace WSGM.Controls;
 /// </summary>
 public class CardButton : Button
 {
+    /// <summary>
+    /// Resolves the <c>ControlTheme</c> for this type and every type derived from it.
+    /// </summary>
+    /// <remarks>
+    /// Avalonia looks a <c>ControlTheme</c> up by the control's actual runtime type, and the theme
+    /// is keyed <c>{x:Type c:CardButton}</c>. Without this override a subclass finds no theme, gets
+    /// no template, and lays out at zero size — present in the tree, counted by the parent, drawing
+    /// nothing.
+    /// <para>
+    /// That is not hypothetical: every row on the overlay's Device page is a
+    /// <c>DescriptorStatusRow</c>, so the page rendered its cards and showed an empty panel under
+    /// the heading while the log correctly reported six rows and sixteen live capabilities. It
+    /// presents as missing data, which is why it survived several passes looking at the data.
+    /// </para>
+    /// </remarks>
+    protected override Type StyleKeyOverride => typeof(CardButton);
+
     /// <summary>
     /// Defines the <see cref="IconGeometry"/> property.
     /// </summary>
@@ -41,10 +59,41 @@ public class CardButton : Button
         AvaloniaProperty.Register<CardButton, string?>(nameof(TrailingText));
 
     /// <summary>
+    /// Defines the <see cref="TrailingGlyph"/> property.
+    /// </summary>
+    /// <remarks>
+    /// Internal, unlike the rest of this control's properties, because the render plan it carries is
+    /// internal: the glyph pipeline is not a public API and nothing outside this assembly should be
+    /// handing a card one. The XAML template resolves it because it compiles into this assembly.
+    /// </remarks>
+    internal static readonly StyledProperty<PhysicalGlyphRenderPlan?> TrailingGlyphProperty =
+        AvaloniaProperty.Register<CardButton, PhysicalGlyphRenderPlan?>(nameof(TrailingGlyph));
+
+    /// <summary>
     /// Defines the <see cref="StatusBrush"/> property.
     /// </summary>
+    /// <summary>Defines the <see cref="SwatchBrush"/> property.</summary>
+    public static readonly StyledProperty<IBrush?> SwatchBrushProperty =
+        AvaloniaProperty.Register<CardButton, IBrush?>(nameof(SwatchBrush));
+
+    /// <summary>
+    /// A live color swatch drawn in the icon slot — an RGB zone's current color — or null to show
+    /// <see cref="IconGeometry"/>. Callers set exactly one of the two.
+    /// </summary>
+    public IBrush? SwatchBrush
+    {
+        get => GetValue(SwatchBrushProperty);
+        set => SetValue(SwatchBrushProperty, value);
+    }
+
     public static readonly StyledProperty<IBrush?> StatusBrushProperty =
         AvaloniaProperty.Register<CardButton, IBrush?>(nameof(StatusBrush));
+
+    /// <summary>
+    /// Defines the <see cref="IsPinned"/> property.
+    /// </summary>
+    public static readonly StyledProperty<bool> IsPinnedProperty =
+        AvaloniaProperty.Register<CardButton, bool>(nameof(IsPinned));
 
     /// <summary>
     /// Gets or sets the vector icon rendered at the left edge of the card,
@@ -90,6 +139,51 @@ public class CardButton : Button
     }
 
     /// <summary>
+    /// Gets or sets the device's own glyph for the activation hint, drawn instead of
+    /// <see cref="TrailingText"/> when one resolved.
+    /// </summary>
+    /// <remarks>
+    /// The text is the fallback rather than the default: a machine with no glyph profile, or one
+    /// whose active input is not the managed handheld, still shows the letter. Setting this never
+    /// removes the text — the two share the trailing slot and exactly one is visible — so clearing
+    /// it restores the letter without the caller having to remember what it was.
+    /// </remarks>
+    internal PhysicalGlyphRenderPlan? TrailingGlyph
+    {
+        get => GetValue(TrailingGlyphProperty);
+        set => SetValue(TrailingGlyphProperty, value);
+    }
+
+    /// <summary>
+    /// Defines the <see cref="ShowTrailingText"/> property.
+    /// </summary>
+    public static readonly DirectProperty<CardButton, bool> ShowTrailingTextProperty =
+        AvaloniaProperty.RegisterDirect<CardButton, bool>(
+            nameof(ShowTrailingText),
+            button => button.ShowTrailingText);
+
+    /// <summary>
+    /// Gets whether the trailing letter is the thing being shown in the trailing slot.
+    /// </summary>
+    /// <remarks>
+    /// Computed rather than bound with a converter because it depends on two properties at once,
+    /// which is the case a <c>TemplateBinding</c> converter cannot express. The glyph wins when it
+    /// resolved, so the two never draw over each other.
+    /// </remarks>
+    public bool ShowTrailingText =>
+        TrailingGlyph is null && !string.IsNullOrEmpty(TrailingText);
+
+    /// <inheritdoc/>
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == TrailingGlyphProperty || change.Property == TrailingTextProperty)
+        {
+            RaisePropertyChanged(ShowTrailingTextProperty, !ShowTrailingText, ShowTrailingText);
+        }
+    }
+
+    /// <summary>
     /// Gets or sets the fill of the small status dot rendered before the trailing
     /// text (a state indicator, for example the wake-lock colors). The dot slot
     /// collapses when this is null.
@@ -98,5 +192,18 @@ public class CardButton : Button
     {
         get => GetValue(StatusBrushProperty);
         set => SetValue(StatusBrushProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets whether this card's original location shows the Quick access pin marker.
+    /// </summary>
+    /// <remarks>
+    /// The marker is presentation state only. The overlay owns the persisted pin list and updates
+    /// this value immediately when the user toggles a row.
+    /// </remarks>
+    public bool IsPinned
+    {
+        get => GetValue(IsPinnedProperty);
+        set => SetValue(IsPinnedProperty, value);
     }
 }

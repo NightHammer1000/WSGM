@@ -1,0 +1,102 @@
+diff --git a/internal/server/api/autoattach_windows.go b/internal/server/api/autoattach_windows.go
+index 4c433c2..40f39c9 100644
+--- a/internal/server/api/autoattach_windows.go
++++ b/internal/server/api/autoattach_windows.go
+@@ -4,6 +4,7 @@ package api
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"log/slog"
+ 	"os/exec"
+@@ -51,15 +52,33 @@ var deviceGUID = windows.GUID{
+ const (
+ 	niMaxHost = 1025
+ 	niMaxServ = 32
++	// SERIAL_BUFSZ, appended to usbip::vhci::ioctl::plugin_hardware in usbip-win2 0.9.7.8.
++	serialBufSz = 16
+ )
+ 
+-// PLUGIN_HARDWARE structure from usbip-win2
++// PLUGIN_HARDWARE structure from usbip-win2.
++//
++// The driver validates Size against its own sizeof(plugin_hardware) and rejects a mismatch with
++// ERROR_INSUFFICIENT_BUFFER, so this structure is version-specific. 0.9.7.8 appended a serial
++// field, which makes the two layouts 1100 and 1116 bytes. Both are declared here and tried in turn
++// rather than probing the installed version: the driver's own rejection is the authority on which
++// one it wants, and it is unambiguous.
+ type attachIOCTL struct {
+ 	Size       uint32
+ 	PortOutput int32
+ 	BusID      [32]byte
+ 	Service    [niMaxServ]byte
+ 	Host       [niMaxHost]byte
++	Serial     [serialBufSz]byte
++}
++
++// Sizes of the two known plugin_hardware layouts, newest first.
++//
++// The legacy size deliberately is not unsafe.Offsetof(Serial) alone: the structure is 4-aligned, so
++// the pre-0.9.7.8 layout ends on a padded boundary the raw offset would not give.
++var attachIOCTLSizes = [2]uint32{
++	uint32(unsafe.Sizeof(attachIOCTL{})),
++	(uint32(unsafe.Offsetof(attachIOCTL{}.Serial)) + 3) &^ 3,
+ }
+ 
+ const (
+@@ -94,7 +113,6 @@ func attachViaIOCTL(ctx context.Context, deviceExportMeta *usbip.ExportMeta, usb
+ 	logger.Debug("Found usbip-win2 device", "path", devicePath)
+ 
+ 	var ioctlData attachIOCTL
+-	ioctlData.Size = uint32(unsafe.Sizeof(ioctlData))
+ 
+ 	busID := fmt.Sprintf("%d-%d", deviceExportMeta.BusId, deviceExportMeta.DevId)
+ 	if len(busID) >= len(ioctlData.BusID) {
+@@ -130,19 +148,34 @@ func attachViaIOCTL(ctx context.Context, deviceExportMeta *usbip.ExportMeta, usb
+ 
+ 	logger.Debug("Opened device handle")
+ 
++	// Try each known plugin_hardware layout, newest first. A driver that expects the other one
++	// rejects this cleanly and specifically with ERROR_INSUFFICIENT_BUFFER before doing anything,
++	// so retrying is safe: it is a size negotiation, not a repeated attach attempt. Any other
++	// failure is a real one and stops here rather than being retried against a layout the driver
++	// has already shown it does not want.
+ 	var bytesReturned uint32
+-	err = windows.DeviceIoControl(
+-		handle,
+-		ioctlPluginHardware,
+-		(*byte)(unsafe.Pointer(&ioctlData)),
+-		uint32(unsafe.Sizeof(ioctlData)),
+-		(*byte)(unsafe.Pointer(&ioctlData)),
+-		uint32(unsafe.Sizeof(ioctlData)),
+-		&bytesReturned,
+-		nil,
+-	)
+-	if err != nil {
+-		return fmt.Errorf("IOControl: DeviceIoControl failed: %w", err)
++	for index, size := range attachIOCTLSizes {
++		ioctlData.Size = size
++		ioctlData.PortOutput = 0
++		err = windows.DeviceIoControl(
++			handle,
++			ioctlPluginHardware,
++			(*byte)(unsafe.Pointer(&ioctlData)),
++			size,
++			(*byte)(unsafe.Pointer(&ioctlData)),
++			size,
++			&bytesReturned,
++			nil,
++		)
++		if err == nil {
++			break
++		}
++
++		if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || index == len(attachIOCTLSizes)-1 {
++			return fmt.Errorf("IOControl: DeviceIoControl failed (plugin_hardware size %d): %w", size, err)
++		}
++
++		logger.Debug("Driver rejected the plugin_hardware layout; trying the other one", "size", size)
+ 	}
+ 
+ 	logger.Debug("IOCTL completed", "bytesReturned", bytesReturned, "portOutput", ioctlData.PortOutput)

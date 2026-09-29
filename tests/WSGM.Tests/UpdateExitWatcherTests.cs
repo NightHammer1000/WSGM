@@ -53,4 +53,27 @@ public sealed class UpdateExitWatcherTests
     [Fact]
     public void EventName_Always_MatchesTheNameTheInstallerOpens()
         => Assert.Equal(@"Local\WSGM.ExitForUpdate", UpdateExitWatcher.EventName);
+
+    [Fact]
+    public void UninstallEventName_Always_MatchesTheNameTheInstallerOpens()
+        => Assert.Equal(@"Local\WSGM.ExitForUninstall", UpdateExitWatcher.UninstallEventName);
+
+    [Fact]
+    public void HandoffEventNameFor_Update_UsesOneCompletionChannel()
+        => Assert.Equal(
+            @"Local\WSGM.ExitForUpdate.Completed",
+            UpdateExitWatcher.HandoffEventNameFor(ApplicationShutdownReason.Update));
+
+    [Fact]
+    public void HandoffEventNameFor_Uninstall_UsesOneSeparateCompletionChannel()
+        => Assert.Equal(
+            @"Local\WSGM.ExitForUninstall.Completed",
+            UpdateExitWatcher.HandoffEventNameFor(ApplicationShutdownReason.Uninstall));
+
+    [Fact]
+    public void HandoffEventNameFor_NonInstallerExit_HasNoCrossProcessChannel()
+    {
+        Assert.Null(UpdateExitWatcher.HandoffEventNameFor(ApplicationShutdownReason.Normal));
+        Assert.Null(UpdateExitWatcher.HandoffEventNameFor(ApplicationShutdownReason.SessionEnd));
+    }
 }

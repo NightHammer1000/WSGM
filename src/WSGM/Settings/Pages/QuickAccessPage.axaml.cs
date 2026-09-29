@@ -3,7 +3,7 @@ using Avalonia.Interactivity;
 
 namespace WSGM.Settings.Pages;
 
-/// <summary>The Quick access settings page: panel/taskbar test launchers, the
+/// <summary>The Quick access settings page: the sheet test launcher, the
 /// Steam Input lease toggle, glyph style, shortcut recorders and edge gestures.
 /// Inherits the window's <see cref="SettingsViewModel"/> DataContext; the test
 /// surfaces and recorders live on the owning <see cref="SettingsWindow"/> and
@@ -16,8 +16,6 @@ public partial class QuickAccessPage : UserControl
     private SettingsWindow? Host => TopLevel.GetTopLevel(this) as SettingsWindow;
 
     private void OnTestOverlay(object? sender, RoutedEventArgs e) => Host?.ShowTestOverlay();
-
-    private void OnTestTaskbar(object? sender, RoutedEventArgs e) => Host?.ShowTestTaskbar();
 
     private void OnRecordHotkey(object? sender, RoutedEventArgs e) => Host?.RecordHotkey();
 

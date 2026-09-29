@@ -37,18 +37,6 @@ public static class SplashAssets
     /// <summary>Gets the per-user directory that holds the materialized splash images.</summary>
     public static string Directory => Path.Combine(Log.Directory, "splash");
 
-    /// <summary>Prepare + immediate commit, for callers with nothing that can fail
-    /// in between. The save path deliberately does NOT use this: it must commit
-    /// only after the config write succeeded.
-    /// Never throws; IO failures are logged and leave the original path in place.</summary>
-    /// <param name="splash">The splash section whose image paths are materialized in place.</param>
-    /// <param name="targetDirectory">The directory that receives the stable copies.</param>
-    internal static void Materialize(SplashConfig splash, string targetDirectory)
-    {
-        using var staged = Prepare(splash, targetDirectory);
-        staged.Commit();
-    }
-
     /// <summary>Stages the images referenced by <paramref name="splash"/> as sidecar
     /// files inside <see cref="Directory"/> and rewrites the config paths to the FINAL
     /// names the sidecars will take on commit. The live files stay untouched until
@@ -343,7 +331,10 @@ public static class SplashAssets
         }
     }
 
-    private static void TryDelete(string path)
+    /// <summary>Best-effort delete shared with the splash-theme import/export
+    /// cleanup paths: a failure is logged, never thrown.</summary>
+    /// <param name="path">The file to delete.</param>
+    internal static void TryDelete(string path)
     {
         try
         {
@@ -351,7 +342,7 @@ public static class SplashAssets
         }
         catch (Exception ex)
         {
-            Log.Warn($"Couldn't delete stale splash image '{path}': {ex.Message}");
+            Log.Warn($"Couldn't delete stale splash file '{path}': {ex.Message}");
         }
     }
 

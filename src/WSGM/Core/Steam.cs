@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -23,13 +24,15 @@ public enum BigPictureShortcut
 /// and its Big Picture window is recognized by class+process.</summary>
 public static class Steam
 {
+    private static readonly TimeSpan UpdateGracefulExitBudget = TimeSpan.FromSeconds(5);
+
     /// <summary>steam.exe plus the process that owns the Big Picture window.</summary>
     public const string ProcessNames = "steam;steamwebhelper";
 
     /// <summary>Just steam.exe — deliberately narrower than <see cref="ProcessNames"/>:
     /// only the main client services steam:// protocol URLs, so a lingering
     /// steamwebhelper must not count as "Steam is running" for protocol callers.</summary>
-    public const string MainProcessName = "steam";
+    private const string MainProcessName = "steam";
 
     /// <summary>Big Picture window class (paired with the steamwebhelper process —
     /// SDL_app alone is not unique to Steam).</summary>
@@ -42,6 +45,10 @@ public static class Steam
     public const string CloseBigPictureUrl = "steam://close/bigpicture";
     /// <summary>Graceful full Steam shutdown (verified client URL).</summary>
     public const string ExitUrl = "steam://exit";
+
+    /// <summary>Gets the complete bounded pre-shutdown window used to release Steam and launch
+    /// wrappers before WSGM starts its separate application-cleanup deadline.</summary>
+    internal static TimeSpan UpdateStopBudget => TimeSpan.FromSeconds(10);
 
     private static string? _cachedExePath;
 
@@ -99,6 +106,33 @@ public static class Steam
     /// directory split at each call site.</summary>
     public static string? InstallDirectory =>
         ExePath is { } exe ? Path.GetDirectoryName(exe) : null;
+
+    /// <summary>Gets the full path of Steam's <c>config\libraryfolders.vdf</c> —
+    /// the install-folder registry every card/library feature reads and edits —
+    /// or <see langword="null"/> when Steam is not installed.</summary>
+    public static string? LibraryFoldersConfigPath =>
+        InstallDirectory is { } directory
+            ? Path.Combine(directory, "config", "libraryfolders.vdf")
+            : null;
+
+    /// <summary>Reads <c>config\libraryfolders.vdf</c>. False when Steam is not
+    /// installed or the file does not exist yet; <paramref name="path"/> still
+    /// carries the resolved location when only the file is missing, so a caller
+    /// can create it. Deliberately does NOT catch IO failures — the callers'
+    /// policies for an unreadable config differ.</summary>
+    /// <param name="path">The config path, or null when Steam is not installed.</param>
+    /// <param name="text">The file text, or null when it could not be resolved.</param>
+    public static bool TryReadLibraryFolders(out string? path, out string? text)
+    {
+        path = LibraryFoldersConfigPath;
+        text = path is not null && File.Exists(path) ? File.ReadAllText(path) : null;
+        return text is not null;
+    }
+
+    /// <summary>Gets Steam's per-account data root (<c>userdata</c>), or
+    /// <see langword="null"/> when Steam is not installed.</summary>
+    public static string? UserDataDirectory =>
+        InstallDirectory is { } directory ? Path.Combine(directory, "userdata") : null;
 
     /// <summary>Gets whether a usable Steam executable was found.</summary>
     public static bool IsInstalled => ExePath is not null;
@@ -178,7 +212,7 @@ public static class Steam
     /// Big Picture — fired as a protocol instead, the handler first brings Steam up
     /// in desktop mode and only switches after login (user-reported wonkiness).
     /// When Steam already runs, the protocol re-activates/enters BP (UIPI-proof).</summary>
-    public static AppLauncher.LaunchResult LaunchBigPicture()
+    public static AppLauncher.LaunchResult LaunchBigPicture(bool unelevated = false)
     {
         if (!IsRunning && ExePath is { } exe)
         {
@@ -190,7 +224,29 @@ public static class Steam
             // libraries to the live client later without a restart. Only takes
             // effect on a fresh Steam start, which this cold path is.
             SteamCdp.EnsureRemoteDebuggingEnabled();
+            // The de-elevating scheduled task is only meaningful from an elevated WSGM: started
+            // from a medium-integrity process, the ordinary launch already produces a
+            // medium-integrity Steam without the task-scheduler round trip.
+            bool deElevate = unelevated && ElevationCheck.IsCurrentProcessElevated() is true;
+            if (deElevate
+                && UnelevatedLauncher.TryStartViaScheduledTask(exe, OpenBigPictureUrl))
+            {
+                Log.Info("Steam launch integrity: medium (de-elevated scheduled task).");
+                return new AppLauncher.LaunchResult(null, true, false);
+            }
+
+            if (deElevate)
+            {
+                Log.Warn(
+                    "Steam launch integrity: de-elevation was requested but unavailable; "
+                    + "falling back to WSGM's own integrity.");
+            }
+
             var result = AppLauncher.Start(exe, OpenBigPictureUrl, elevated: false);
+            Log.Info(
+                "Steam launch integrity: "
+                + (ElevationCheck.IsCurrentProcessElevated() is true ? "elevated" : "medium")
+                + " (matched to WSGM).");
             // Only when a vector is actually deployed, and worded as the EXPECTED
             // path. docs\steam-input.md tells the reader a missing file means the
             // gate worker never got past the loader — so naming a path for a Steam
@@ -244,42 +300,63 @@ public static class Steam
         _ => throw new ArgumentOutOfRangeException(nameof(shortcut)),
     };
 
-    /// <summary>Stops Steam for an application update that must replace an
-    /// injected payload DLL. First requests Steam's normal shutdown, then uses
-    /// WSGM's possibly elevated token to end any client that remains after a
-    /// bounded grace period; the unelevated installer cannot do this reliably.</summary>
-    public static void StopForUpdate()
+    /// <summary>Requests a graceful Steam shutdown for an application update.</summary>
+    public static void StopForUpdate() => StopForUpdate(UpdateStopBudget);
+
+    /// <summary>Stops Steam and launch wrappers without exceeding the updater-owned pre-shutdown
+    /// window through any process-exit wait. The installer reserves this phase before WSGM's
+    /// application cleanup budget.</summary>
+    /// <param name="budget">Maximum combined graceful and forced-stop wait.</param>
+    internal static void StopForUpdate(TimeSpan budget)
     {
-        if (IsRunning)
+        if (budget <= TimeSpan.Zero)
         {
+            throw new ArgumentOutOfRangeException(nameof(budget));
+        }
+
+        Stopwatch elapsed = Stopwatch.StartNew();
+        Process[] runningSteam = CurrentSessionProcesses(MainProcessName);
+        if (runningSteam.Length > 0)
+        {
+            foreach (Process process in runningSteam)
+            {
+                process.Dispose();
+            }
             Log.Info("Update requested — closing Steam to release the Steam Input payload.");
             AppLauncher.StartProtocol(ExitUrl);
-            for (var attempt = 0; attempt < 20; attempt++)
+            TimeSpan gracefulDeadline = budget < UpdateGracefulExitBudget
+                ? budget
+                : UpdateGracefulExitBudget;
+            while (elapsed.Elapsed < gracefulDeadline)
             {
-                var remaining = Process.GetProcessesByName(MainProcessName);
+                Process[] remaining = CurrentSessionProcesses(MainProcessName);
                 if (remaining.Length == 0)
                 {
                     Log.Info("Steam exited gracefully for update.");
                     break;
                 }
-                foreach (var process in remaining)
+                foreach (Process process in remaining)
                 {
                     process.Dispose();
                 }
-                Thread.Sleep(250);
+
+                TimeSpan delay = gracefulDeadline - elapsed.Elapsed;
+                if (delay > TimeSpan.Zero)
+                {
+                    Thread.Sleep(delay < TimeSpan.FromMilliseconds(250)
+                        ? delay
+                        : TimeSpan.FromMilliseconds(250));
+                }
             }
 
-            foreach (var process in Process.GetProcessesByName(MainProcessName))
+            Process[] remainingSteam = CurrentSessionProcesses(MainProcessName);
+            foreach (Process process in remainingSteam)
             {
                 try
                 {
-                    Log.Warn($"Steam did not exit for update — ending process {process.Id}.");
-                    process.Kill(entireProcessTree: true);
-                    process.WaitForExit(5_000);
-                }
-                catch (Exception ex)
-                {
-                    Log.Warn($"Could not end Steam process {process.Id} for update: {ex.Message}");
+                    Log.Warn(
+                        $"Steam pid {process.Id} did not exit gracefully; setup will defer the "
+                            + "update instead of terminating Steam or a running game.");
                 }
                 finally
                 {
@@ -288,6 +365,41 @@ public static class Steam
             }
         }
 
-        LaunchWrapperCommand.StopRunningHelpers("update");
+        TimeSpan helperBudget = budget - elapsed.Elapsed;
+        if (helperBudget > TimeSpan.Zero)
+        {
+            LaunchWrapperCommand.StopRunningHelpers("update", helperBudget);
+        }
+        else
+        {
+            Log.Warn("Update-stop budget expired before launch wrappers could be ended.");
+        }
     }
+
+    private static Process[] CurrentSessionProcesses(string processName)
+    {
+        int sessionId = Process.GetCurrentProcess().SessionId;
+        var matches = new List<Process>();
+        foreach (Process process in Process.GetProcessesByName(processName))
+        {
+            try
+            {
+                if (process.SessionId == sessionId)
+                {
+                    matches.Add(process);
+                }
+                else
+                {
+                    process.Dispose();
+                }
+            }
+            catch
+            {
+                process.Dispose();
+            }
+        }
+
+        return [.. matches];
+    }
+
 }

@@ -1,7 +1,7 @@
 <!-- Single source of truth for the WSGM color vocabulary. Handheld Companion's
      ModernWPF theme is a charcoal WinUI surface with an orange accent; these
      tokens carry that vocabulary through FluentAvalonia instead of inventing a
-     separate visual language. Accent-family tokens (HcAccentColor, HcAccentBrush,
+     separate visual language. Accent-family tokens (HcAccentBrush,
      HcOnAccentBrush, HcOnAccentCaptionBrush) are shadowed at runtime by the
      accent pipeline, so consumers must reference them via DynamicResource; every
      other token is stable and consumed via StaticResource. -->
@@ -33,12 +33,8 @@
     <SolidColorBrush x:Key="HcTextMutedBrush" Color="#FFB8B8B8" />
 
     <!-- Accent family: shadowed in Application.Resources by the runtime accent
-         pipeline. Consume via DynamicResource only.
-         HcAccentColor has no consumer today: it is the Color-typed form of the
-         accent, kept (and kept in sync by AccentPalette.Apply) for consumers
-         that need a Color rather than a brush — a gradient stop, a drawn
-         surface. Do not treat it as dead until that write goes too. -->
-    <Color x:Key="HcAccentColor">#FFFF9D3D</Color>
+         pipeline (AccentPalette.DefaultAccent is the authoritative default).
+         Consume via DynamicResource only. -->
     <SolidColorBrush x:Key="HcAccentBrush" Color="#FFFF9D3D" />
     <SolidColorBrush x:Key="HcOnAccentBrush" Color="Black" />
     <SolidColorBrush x:Key="HcOnAccentCaptionBrush" Color="#CC000000" />

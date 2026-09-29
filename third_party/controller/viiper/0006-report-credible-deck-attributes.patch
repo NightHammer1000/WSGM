@@ -1,0 +1,72 @@
+diff --git a/device/steamdeck/const.go b/device/steamdeck/const.go
+index a49325a..77b4014 100644
+--- a/device/steamdeck/const.go
++++ b/device/steamdeck/const.go
+@@ -64,6 +64,7 @@ const (
+ 	AttributeCapabilities         = 0x02
+ 	AttributeFirmwareBuildTime    = 0x04
+ 	AttributeBoardRevision        = 0x09
++	AttributeBootloaderBuildTime  = 0x0a
+ 	AttributeConnectionIntervalUs = 0x0b
+ )
+ 
+diff --git a/device/steamdeck/device.go b/device/steamdeck/device.go
+index c449022..2b4e603 100644
+--- a/device/steamdeck/device.go
++++ b/device/steamdeck/device.go
+@@ -88,8 +88,14 @@ func newControllerState() controllerState {
+ 		boardSerial:  "SteamDeck-0001",
+ 		unitSerial:   "SteamDeck-0001",
+ 		uniqueID:     0x53444543,
+-		boardRev:     1,
+-		firmwareTime: 0x20260226,
++		// Steam gates controller features on these identity attributes. A board revision and
++		// firmware build time it has never seen on a real Deck (the previous BCD-style
++		// 0x20260226 reads as the year 1987 when taken as the unix epoch Steam expects) make
++		// Steam withhold ID_TRIGGER_RUMBLE_CMD entirely, while SDL sends it regardless —
++		// rumble then works from SDL applications but never from Steam Input. These values
++		// mirror hhd's emulated Deck, which Steam demonstrably sends rumble to.
++		boardRev:     0x2e,
++		firmwareTime: 0x677c61b7,
+ 		mode:         LizardModeOn,
+ 	}
+ 	return state
+@@ -382,6 +388,13 @@ func (d *SteamDeck) fillAttributes(buf []byte) byte {
+ 		{tag: AttributeFirmwareBuildTime, value: d.controller.firmwareTime},
+ 		{tag: AttributeBoardRevision, value: d.controller.boardRev},
+ 		{tag: AttributeConnectionIntervalUs, value: 4000},
++		// The remaining attributes a current Deck reports (hhd mirrors the same set). Steam
++		// queries them on connect; answering with a truncated set marks the firmware as
++		// ancient and costs Steam-side features such as rumble.
++		{tag: AttributeBootloaderBuildTime, value: 0x62a9122b},
++		{tag: 0x0c, value: 0},
++		{tag: 0x0d, value: 0},
++		{tag: 0x0e, value: 0},
+ 	}
+ 
+ 	offset := 0
+diff --git a/device/steamdeck/steamdeck_test.go b/device/steamdeck/steamdeck_test.go
+index 655b666..c33d0dc 100644
+--- a/device/steamdeck/steamdeck_test.go
++++ b/device/steamdeck/steamdeck_test.go
+@@ -244,11 +244,19 @@ func TestFeatureResponses(t *testing.T) {
+ 		return
+ 	}
+ 	assert.Equal(t, byte(steamdeck.FeatureGetAttributesValues), resp[0])
+-	assert.Equal(t, byte(30), resp[1])
++	assert.Equal(t, byte(50), resp[1])
+ 	assert.Equal(t, byte(steamdeck.AttributeProductID), resp[7])
+ 	assert.Equal(t, uint32(steamdeck.DefaultPID), binary.LittleEndian.Uint32(resp[8:12]))
+ 	assert.Equal(t, byte(steamdeck.AttributeConnectionIntervalUs), resp[27])
+ 	assert.Equal(t, uint32(4000), binary.LittleEndian.Uint32(resp[28:32]))
++	// Steam withholds features (rumble among them) from firmware identities it has never seen
++	// on a real Deck, so the credible build times and board revision are pinned here.
++	assert.Equal(t, byte(steamdeck.AttributeBoardRevision), resp[22])
++	assert.Equal(t, uint32(0x2e), binary.LittleEndian.Uint32(resp[23:27]))
++	assert.Equal(t, byte(steamdeck.AttributeFirmwareBuildTime), resp[17])
++	assert.Equal(t, uint32(0x677c61b7), binary.LittleEndian.Uint32(resp[18:22]))
++	assert.Equal(t, byte(steamdeck.AttributeBootloaderBuildTime), resp[32])
++	assert.Equal(t, uint32(0x62a9122b), binary.LittleEndian.Uint32(resp[33:37]))
+ 
+ 	resp, handled = dev.HandleControl(0xa1, 0x01, uint16(0x0300|steamdeck.FeatureGetStringAttribute), 0, steamdeck.InputReportLen, nil)
+ 	if !assert.True(t, handled) {

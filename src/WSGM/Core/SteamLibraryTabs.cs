@@ -72,7 +72,7 @@ public static class SteamLibraryTabs
             "nativeTabs:(window.__wsgm.nativeTabs||[])});}" +
             "catch(e){return JSON.stringify({ok:false,err:String((e&&e.stack)||e)});}})()";
 
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable)
         {
@@ -121,7 +121,7 @@ public static class SteamLibraryTabs
             "W.forceRerender&&W.forceRerender();" +
             "return JSON.stringify({ok:true});}" +
             "catch(e){return JSON.stringify({ok:false,err:String(e)});}})()";
-        var result = await SteamCef.EvaluateAsync(expression, Budget, cancellationToken)
+        var result = await SteamUiTransportSession.EvaluateAsync(expression, Budget, cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable || result.Value is null)
         {
@@ -162,8 +162,8 @@ public static class SteamLibraryTabs
 
     /// <summary>Removes WSGM's dispatcher hook and tab definitions for the current
     /// Steam session. Best-effort; a Steam restart remains the outer recovery path.</summary>
-    public static Task<CefEvalResult> DisableAsync(CancellationToken cancellationToken = default)
-        => SteamCef.EvaluateAsync(
+    internal static Task<CefEvalResult> DisableAsync(CancellationToken cancellationToken = default)
+        => SteamUiTransportSession.EvaluateAsync(
             "(async()=>{try{const W=window.__wsgm;if(W){W.tabs=[];W.tabOrder=[];W.hiddenTabs=[];W.forceRerender&&W.forceRerender();await new Promise(r=>setTimeout(r,100));W.suspendTabs&&W.suspendTabs();}return JSON.stringify({ok:true});}catch(e){return JSON.stringify({ok:false,err:String(e)});}})()",
             Budget, cancellationToken);
 

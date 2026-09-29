@@ -169,12 +169,9 @@ public static class SteamInputBlocker
             _lease = null;
             try
             {
-                // Release already performs recovery: a payload advertising
-                // internal recovery schedules discovery on its own timer, and
-                // one without it makes the host run the guarded two-pass scan
-                // inline. Repeating it here only bought a second multi-second
-                // scan of Steam's address space, which the next overlay open
-                // then waited on.
+                // Release already performs recovery; repeating it here costs a
+                // second multi-second scan of Steam's address space that the next
+                // overlay open then waits on.
                 var outcome = lease.Release();
                 Log.Info($"Steam Input lease released ({reason}; {outcome.Status.LeaseCount} active " +
                          $"leases remain; recovery {DescribeRecovery(outcome)}).");
@@ -189,9 +186,7 @@ public static class SteamInputBlocker
             }
             catch (Exception ex)
             {
-                // The release handshake itself failed. The SafeHandle/pipe
-                // lifetime still makes that crash-safe; preserve shutdown and
-                // capture the diagnosis.
+                // The SafeHandle/pipe lifetime makes a failed handshake crash-safe.
                 lease.Dispose();
                 Log.Error($"Steam Input lease release failed ({reason}).", ex);
             }
@@ -208,15 +203,10 @@ public static class SteamInputBlocker
         _ => "UNAVAILABLE",
     };
 
-    /// <summary>Uses the host resolver rather than the payload capability bit as
-    /// the compatibility authority. The payload and host resolve independently;
-    /// a missing in-process target does not mean WSGM cannot restore Steam input.
-    /// This runs at acquire, moments after the lease revoked Steam's HID handles,
-    /// so Steam is mid-teardown of its HID thread and the live-object election
-    /// races an abandoned look-alike. A failure here is therefore only a
-    /// heads-up, NOT proof recovery will fail: the release path performs the real
-    /// recovery and is the user-facing authority. Log it for diagnosis; do not
-    /// raise the panel warning off this probe.</summary>
+    /// <summary>Probes host-side recovery at acquire time. Runs while Steam is
+    /// mid-teardown of its HID thread, so a failure is only a heads-up, not proof
+    /// recovery will fail: the release path performs the real recovery and is the
+    /// user-facing authority. Log it; never raise the panel warning off this probe.</summary>
     private static void CheckHostRecoveryBestEffort()
     {
         try

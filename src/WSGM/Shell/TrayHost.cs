@@ -238,11 +238,12 @@ public sealed unsafe class TrayHost : IDisposable
 
             case TrayProtocol.CopyDataLoadInProc:
                 // COM shell service objects (system volume/network/clock icons).
-                // Structurally unsupported: WSGM is COM-free by AOT policy.
+                // WSGM owns those surfaces itself and does not host arbitrary
+                // in-process Explorer extensions.
                 if (!_loggedLoadInProc)
                 {
                     _loggedLoadInProc = true;
-                    Log.Info("Tray host: SHLoadInProc request rejected (COM-free build).");
+                    Log.Info("Tray host: SHLoadInProc request rejected (in-process Explorer extensions are unsupported).");
                 }
                 return 0;
 
@@ -270,7 +271,12 @@ public sealed unsafe class TrayHost : IDisposable
         var change = _table.Apply(parsed, out var icon);
         if (change == TrayChange.Rejected)
         {
-            Log.Info($"Tray {Describe(parsed.Message)} rejected (hwnd 0x{parsed.Hwnd:X}, uid {parsed.Uid}).");
+            // Applications retry a rejected NIM_ADD on their own timer and never stop, so this was
+            // ~6,000 lines across a handful of windows in one session. Keyed per window and uid so
+            // a NEW application being rejected is still a new line.
+            Log.Change(
+                $"tray.rejected.{parsed.Hwnd:X}.{parsed.Uid}",
+                $"Tray {Describe(parsed.Message)} rejected (hwnd 0x{parsed.Hwnd:X}, uid {parsed.Uid}).");
             return 0;
         }
 
@@ -362,25 +368,8 @@ public sealed unsafe class TrayHost : IDisposable
         }
         if (!TrayProtocol.IsRelayableCallback(icon.CallbackMessage))
         {
-            // Both halves of this send are attacker-supplied: the callback message
-            // AND the target hwnd come straight off the WM_COPYDATA wire, which the
-            // UIPI allowance in CreateWindows deliberately opens to Medium-IL
-            // senders, and SendNotifyMessageW below leaves High IL outbound where
-            // UIPI restricts nothing. Without this bound a Medium-IL process could
-            // register an icon naming an ELEVATED window with uCallbackMessage =
-            // WM_CLOSE / WM_SYSCOMMAND and have the tray deliver it on the next
-            // click. The filter is on the MESSAGE and never on the target's
-            // integrity level: WSGM itself starts Handheld Companion / RTSS /
-            // MSI Afterburner elevated (Core\KnownStartupApps.cs), so an IL-based
-            // filter would break exactly the apps the device depends on.
-            //
-            // Registration is untouched on purpose (see IsRelayableCallback): the
-            // icon stays registered, rendered and tooltipped, and shell32 still sees
-            // a success reply — a rejected NIM_ADD would put well-behaved apps into
-            // an add/reject loop. One-shot logging for the same reason the
-            // Added/Removed filter exists above: a per-click line from a hostile or
-            // simply odd registration would push the boot/takeover/lease lines out
-            // of the capped log.
+            // Relay only application-defined messages. Registration still succeeds so shell32
+            // does not retry NIM_ADD, and one-shot logging preserves the bounded diagnostic log.
             if (!_loggedBlockedCallback)
             {
                 _loggedBlockedCallback = true;

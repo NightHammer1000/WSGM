@@ -86,7 +86,7 @@ public sealed class BootSplash
             CloseAfter(TouchCloseGrace);
             return;
         }
-        if (WindowFinder.FindWindow(Steam.ProcessNames, Steam.BigPictureWindowClass) != 0)
+        if (Steam.IsBigPictureVisible)
         {
             OnBigPictureDetected();
         }

@@ -16,6 +16,9 @@ namespace WSGM.Core;
 /// fire too.</summary>
 public static class UpdateExitWatcher
 {
+    private static nint _updateCompletionEvent;
+    private static nint _uninstallCompletionEvent;
+
     // CROSS-VERSION CONTRACT — do not rename this event and do not narrow the
     // 0x00100002 grant below. During an update the event object is created by the
     // OLD running build; the new installer only opens it BY NAME and signals it
@@ -27,6 +30,9 @@ public static class UpdateExitWatcher
 
     /// <summary>Gets the per-session event used by an updater to request a graceful exit.</summary>
     public const string EventName = @"Local\WSGM.ExitForUpdate";
+
+    /// <summary>Gets the per-session event used by the uninstaller for its longer cleanup budget.</summary>
+    public const string UninstallEventName = @"Local\WSGM.ExitForUninstall";
 
     // The setup is ALWAYS elevated (PrivilegesRequired=admin): the user-SID ACE
     // covers every same-user WSGM instance (elevated or filtered token — the user
@@ -49,11 +55,50 @@ public static class UpdateExitWatcher
     internal static string BuildEventSddl(string? userSid)
         => $"D:(A;;0x00100002;;;{userSid ?? "WD"})(A;;0x00100002;;;BA)S:(ML;;NW;;;ME)";
 
-    private static nint _event;
+    internal static string? HandoffEventNameFor(ApplicationShutdownReason reason) =>
+        reason switch
+        {
+            ApplicationShutdownReason.Update => $"{EventName}.Completed",
+            ApplicationShutdownReason.Uninstall => $"{UninstallEventName}.Completed",
+            _ => null,
+        };
+
+    internal static void ReportHandoff(
+        ApplicationShutdownReason reason,
+        ApplicationShutdownOutcome outcome)
+    {
+        nint handoffEvent = reason switch
+        {
+            ApplicationShutdownReason.Update => _updateCompletionEvent,
+            ApplicationShutdownReason.Uninstall => _uninstallCompletionEvent,
+            _ => 0,
+        };
+        if (handoffEvent == 0
+            && reason is not (ApplicationShutdownReason.Update
+                or ApplicationShutdownReason.Uninstall))
+        {
+            return;
+        }
+
+        Log.Info($"Installer shutdown handoff completed: reason={reason}, outcome={outcome}.");
+        if (handoffEvent == 0)
+        {
+            Log.Warn($"Installer shutdown completion channel was unavailable ({reason}).");
+            return;
+        }
+
+        if (!NativeMethods.SetEvent(handoffEvent))
+        {
+            Log.Warn(
+                $"Installer shutdown completion could not be published ({reason}; "
+                + $"error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
+        }
+    }
 
     /// <summary>Starts watching for the updater's graceful-exit request.</summary>
     /// <param name="onExitRequested">The callback that runs the normal application shutdown path.</param>
-    public static void Start(Action onExitRequested)
+    /// <param name="onUninstallRequested">The callback that runs the uninstall shutdown path.</param>
+    public static void Start(Action onExitRequested, Action? onUninstallRequested = null)
     {
         try
         {
@@ -62,87 +107,147 @@ public static class UpdateExitWatcher
             {
                 userSid = identity.User?.Value;
             }
-            if (!NativeMethods.ConvertStringSecurityDescriptorToSecurityDescriptor(BuildEventSddl(userSid), 1, out var sd, out _))
+            _updateCompletionEvent = StartHandoffEvent(
+                ApplicationShutdownReason.Update,
+                "update",
+                userSid);
+            StartWatcher(EventName, "update", userSid, onExitRequested);
+            if (onUninstallRequested is not null)
             {
-                Log.Warn($"Update-exit watcher: SDDL conversion failed (error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
-                return;
+                _uninstallCompletionEvent = StartHandoffEvent(
+                    ApplicationShutdownReason.Uninstall,
+                    "uninstall",
+                    userSid);
+                StartWatcher(
+                    UninstallEventName,
+                    "uninstall",
+                    userSid,
+                    onUninstallRequested);
             }
-            int createError;
-            try
-            {
-                var attributes = new NativeMethods.SecurityAttributes
-                {
-                    nLength = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.SecurityAttributes>(),
-                    lpSecurityDescriptor = sd,
-                    bInheritHandle = 0,
-                };
-                // Manual-reset: the installer signals exactly once, and EVERY waiting
-                // instance (elevated shell + settings window) must be released by it.
-                _event = NativeMethods.CreateEventW(ref attributes, manualReset: true, initialState: false, EventName);
-                createError = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-            }
-            finally
-            {
-                NativeMethods.LocalFree(sd);
-            }
-            if (_event == 0 && createError == 5 /* ERROR_ACCESS_DENIED */)
-            {
-                // The event already exists (another WSGM instance created it) and its
-                // DACL grants this user only MODIFY_STATE|SYNCHRONIZE, so CreateEventW's
-                // implicit EVENT_ALL_ACCESS open is denied. SYNCHRONIZE to wait plus
-                // MODIFY_STATE for the stale-signal reset below is all a watcher
-                // needs — device-confirmed 'CreateEvent failed' in the field.
-                _event = NativeMethods.OpenEventW(NativeMethods.Synchronize | NativeMethods.EventModifyState, false, EventName);
-                if (_event == 0)
-                {
-                    Log.Warn($"Update-exit watcher: OpenEvent fallback failed (error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
-                    return;
-                }
-                Log.Info("Update-exit watcher: opened existing event (MODIFY_STATE|SYNCHRONIZE).");
-            }
-            else if (_event == 0)
-            {
-                Log.Warn($"Update-exit watcher: CreateEvent failed (error {createError}).");
-                return;
-            }
-
-            // A manual-reset event stays signaled for as long as ANY handle keeps the
-            // kernel object alive. After an update, the old instance's slow graceful
-            // teardown can carry the installer's signal past the relaunch; without
-            // this reset the fresh instance would see that stale signal and shut
-            // itself down immediately — update "done", no shell running. Any signal
-            // present at watcher start predates this process, so clearing it is
-            // always correct (this user's grant includes EVENT_MODIFY_STATE).
-            if (!NativeMethods.ResetEvent(_event))
-            {
-                Log.Warn($"Update-exit watcher: could not clear stale signal (error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
-            }
-
-            var thread = new Thread(() =>
-            {
-                try
-                {
-                    NativeMethods.WaitForSingleObject(_event, uint.MaxValue);
-                    Log.Info("Exit requested by installer (update).");
-                    onExitRequested();
-                }
-                catch (Exception ex)
-                {
-                    // Watcher must never take the shell down — but a failed
-                    // shutdown request is why the installer falls back to
-                    // taskkill, so it has to be visible in the log.
-                    Log.Warn($"Update-exit watcher: shutdown request failed: {ex.Message}");
-                }
-            })
-            {
-                IsBackground = true,
-                Name = "WSGM.UpdateExit",
-            };
-            thread.Start();
         }
         catch (Exception ex)
         {
             Log.Warn($"Update-exit watcher not available: {ex.Message}");
         }
+    }
+
+    private static nint StartHandoffEvent(
+        ApplicationShutdownReason reason,
+        string operation,
+        string? userSid)
+    {
+        string eventName = HandoffEventNameFor(reason)
+            ?? throw new InvalidOperationException("Installer handoff reason has no event name.");
+        return CreateOrOpenEvent(
+            eventName,
+            $"{operation} completion",
+            userSid,
+            clearStaleSignal: false);
+    }
+
+    private static void StartWatcher(
+        string eventName,
+        string operation,
+        string? userSid,
+        Action callback)
+    {
+        nint exitEvent = CreateOrOpenEvent(
+            eventName,
+            $"{operation}-exit watcher",
+            userSid,
+            clearStaleSignal: true);
+        if (exitEvent == 0)
+        {
+            return;
+        }
+
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                NativeMethods.WaitForSingleObject(exitEvent, uint.MaxValue);
+                Log.Info($"Exit requested by installer ({operation}).");
+                callback();
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"{operation}-exit watcher: shutdown request failed: {ex.Message}");
+            }
+        })
+        {
+            IsBackground = true,
+            Name = $"WSGM.{operation}Exit",
+        };
+        thread.Start();
+    }
+
+    private static nint CreateOrOpenEvent(
+        string eventName,
+        string operation,
+        string? userSid,
+        bool clearStaleSignal)
+    {
+        if (!NativeMethods.ConvertStringSecurityDescriptorToSecurityDescriptor(
+            BuildEventSddl(userSid),
+            1,
+            out nint securityDescriptor,
+            out _))
+        {
+            Log.Warn(
+                $"{operation}: SDDL conversion failed "
+                + $"(error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
+            return 0;
+        }
+
+        nint exitEvent;
+        int createError;
+        try
+        {
+            var attributes = new NativeMethods.SecurityAttributes
+            {
+                nLength = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.SecurityAttributes>(),
+                lpSecurityDescriptor = securityDescriptor,
+                bInheritHandle = 0,
+            };
+            exitEvent = NativeMethods.CreateEventW(
+                ref attributes,
+                manualReset: true,
+                initialState: false,
+                eventName);
+            createError = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        }
+        finally
+        {
+            NativeMethods.LocalFree(securityDescriptor);
+        }
+
+        if (exitEvent == 0 && createError == 5 /* ERROR_ACCESS_DENIED */)
+        {
+            exitEvent = NativeMethods.OpenEventW(
+                NativeMethods.Synchronize | NativeMethods.EventModifyState,
+                false,
+                eventName);
+            if (exitEvent == 0)
+            {
+                Log.Warn(
+                    $"{operation}: OpenEvent fallback failed "
+                    + $"(error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
+                return 0;
+            }
+        }
+        else if (exitEvent == 0)
+        {
+            Log.Warn($"{operation}: CreateEvent failed (error {createError}).");
+            return 0;
+        }
+
+        if (clearStaleSignal && !NativeMethods.ResetEvent(exitEvent))
+        {
+            Log.Warn(
+                $"{operation}: could not clear stale signal "
+                + $"(error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
+        }
+
+        return exitEvent;
     }
 }

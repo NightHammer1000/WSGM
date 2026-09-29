@@ -171,16 +171,4 @@ public sealed class LaunchWrapperView : OverlaySubView
         SetContent(stack);
     }
 
-    private async Task<IReadOnlyList<SteamCollections.AppInfo>> SafeGamesAsync()
-    {
-        try
-        {
-            return await SteamCollections.GetGamesAsync();
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"{LogScope}: could not list games: {ex.Message}");
-            return [];
-        }
-    }
 }

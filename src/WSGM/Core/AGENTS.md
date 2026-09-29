@@ -4,8 +4,9 @@ Core contains cross-cutting, non-visual application primitives: configuration, S
 Explorer control, elevation/de-elevation, splash assets, process mode selection, logging, and Win32
 utilities.
 
-- Keep public production APIs XML-documented and NativeAOT-safe; prefer source generation over
-  reflection and `LibraryImport` with blittable signatures for native calls.
+- Keep public production APIs meaningfully XML-documented. Prefer direct managed APIs and keep OS
+  interop behind `Interop\`; retain source-generated JSON where it makes durable wire/config shapes
+  explicit.
 - `ConfigStore` owns the cross-process lock and atomic merge/save flow. Do not bypass it or write the
   real `%LOCALAPPDATA%\WSGM` configuration from tests.
 - Read-modify-write operations must use the strict mutation load: an existing unreadable config is

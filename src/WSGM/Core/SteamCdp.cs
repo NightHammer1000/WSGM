@@ -72,7 +72,9 @@ public static class SteamCdp
 {
     /// <summary>Writes the CEF remote-debugging flag so Steam opens its localhost
     /// devtools port on next start. Idempotent and best-effort.</summary>
-    public static bool EnsureRemoteDebuggingEnabled() => SteamCef.EnsureRemoteDebuggingEnabled();
+    /// <remarks>Finding Steam is WSGM's job, not the toolkit's, so the directory is passed in.</remarks>
+    public static bool EnsureRemoteDebuggingEnabled() =>
+        SteamCef.EnsureRemoteDebuggingEnabled(Steam.InstallDirectory);
 
     /// <summary>Blocking wrapper for worker-thread callers (never call on the UI thread).</summary>
     /// <param name="libraryPath">The library folder, e.g. <c>E:\SteamLibrary</c>.</param>
@@ -102,7 +104,7 @@ public static class SteamCdp
         string libraryPath, string? label = null, bool replaceExisting = false,
         CancellationToken cancellationToken = default)
     {
-        var result = await SteamCef.EvaluateAsync(
+        var result = await SteamUiTransportSession.EvaluateAsync(
             BuildAddExpression(libraryPath, label, replaceExisting),
             TimeSpan.FromSeconds(10), cancellationToken)
             .ConfigureAwait(false);
@@ -130,15 +132,21 @@ public static class SteamCdp
         {
             return new SteamLibraryRemoveResult(SteamLibraryRemoveStatus.NotPresent, null);
         }
+        // The same normalizer the injected script uses (docs\steam-cef.md §8): the two forms have
+        // to agree, and a bare trim does not — it leaves "D:/Games" and "D:\Games" unequal here
+        // while Steam's side treats them as one folder.
+        var normalized = Shell.SteamLibraryVdf.NormalizePath(libraryPath);
         var matchingPaths = Shell.SteamLibraryVdf.ValuesOf(libraryFoldersVdf, "path")
-            .Count(path => string.Equals(path.TrimEnd('\\', '/'),
-                libraryPath.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+            .Count(path => string.Equals(
+                Shell.SteamLibraryVdf.NormalizePath(path),
+                normalized,
+                StringComparison.Ordinal));
         if (matchingPaths != 1)
         {
             return new SteamLibraryRemoveResult(SteamLibraryRemoveStatus.Rejected,
                 "ContentIdPathAmbiguous");
         }
-        var result = await SteamCef.EvaluateAsync(
+        var result = await SteamUiTransportSession.EvaluateAsync(
             BuildRemoveExpression(libraryPath), TimeSpan.FromSeconds(10), cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable)
@@ -164,7 +172,7 @@ public static class SteamCdp
     public static async Task<SteamLibraryRemoveResult> RemoveLibrariesAtPathAsync(
         string libraryPath, CancellationToken cancellationToken = default)
     {
-        var result = await SteamCef.EvaluateAsync(
+        var result = await SteamUiTransportSession.EvaluateAsync(
             BuildRemoveExpression(libraryPath), TimeSpan.FromSeconds(10), cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable)
@@ -192,15 +200,19 @@ public static class SteamCdp
         {
             return new SteamLibraryLabelResult(SteamLibraryLabelStatus.NotPresent, null);
         }
+        // Same normalizer as the injected script — see the remove path above.
+        var normalized = Shell.SteamLibraryVdf.NormalizePath(libraryPath);
         var matchingPaths = Shell.SteamLibraryVdf.ValuesOf(libraryFoldersVdf, "path")
-            .Count(path => string.Equals(path.TrimEnd('\\', '/'),
-                libraryPath.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+            .Count(path => string.Equals(
+                Shell.SteamLibraryVdf.NormalizePath(path),
+                normalized,
+                StringComparison.Ordinal));
         if (matchingPaths != 1)
         {
             return new SteamLibraryLabelResult(SteamLibraryLabelStatus.Rejected,
                 "ContentIdPathAmbiguous");
         }
-        var result = await SteamCef.EvaluateAsync(
+        var result = await SteamUiTransportSession.EvaluateAsync(
             BuildLabelExpression(libraryPath, label), TimeSpan.FromSeconds(10), cancellationToken)
             .ConfigureAwait(false);
         if (!result.Reachable)

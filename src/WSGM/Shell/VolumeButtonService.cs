@@ -1,4 +1,5 @@
 using System;
+using WindowsDeviceControl;
 using WSGM.Core;
 using WSGM.Interop;
 
@@ -11,15 +12,20 @@ internal sealed class VolumeButtonService : IDisposable
 {
     private readonly MessageWindow _window;
     private readonly VolumeIndicator _indicator;
+    private readonly AudioManager _audio;
     private bool _gameModeActive;
-    private bool _nativeHelperUnavailable;
     private bool _disposed;
 
     /// <summary>Creates the game-mode volume handler on the Avalonia UI thread.</summary>
-    internal VolumeButtonService(MessageWindow window, Func<double> uiScale)
+    /// <param name="window">The process message-only window carrying the shell hook.</param>
+    /// <param name="uiScale">The current UI scale for the OSD.</param>
+    /// <param name="audio">The session's audio state owner, told about every volume
+    /// this service writes so the taskbar slider does not lag the OSD by a poll.</param>
+    internal VolumeButtonService(MessageWindow window, Func<double> uiScale, AudioManager audio)
     {
         _window = window;
         _indicator = new VolumeIndicator(uiScale);
+        _audio = audio;
         _window.ShellHookReceived += OnShellHook;
     }
 
@@ -34,7 +40,8 @@ internal sealed class VolumeButtonService : IDisposable
         _gameModeActive = active;
         if (active)
         {
-            VolumeFeedback.Initialize();
+            // VolumeFeedback is preopened by AudioManager.Start, which the session
+            // runs before this service exists; Play() self-initializes as backstop.
             if (_window.RegisterShellHook())
             {
                 Log.Info("Game-mode volume buttons enabled (shell hook + default audio endpoint).");
@@ -58,24 +65,21 @@ internal sealed class VolumeButtonService : IDisposable
             return;
         }
 
-        var command = VolumeAppCommands.FromShellHookLParam(data);
-        if (command == 0)
-        {
-            return;
-        }
-
-        if (_nativeHelperUnavailable)
+        if (VolumeAppCommands.FromShellHookLParam(data) is not { } command)
         {
             return;
         }
 
         try
         {
-            var result = NativeVolumeControl.ApplyCommand(command, out var percentage, out var muted);
+            var result = CoreAudio.ApplyCommand(command, out var percentage, out var muted);
             if (result >= 0)
             {
-                Log.Info($"Volume button {VolumeAppCommands.Describe(command)} applied to the default audio endpoint " +
+                Log.Info($"Volume button {command} applied to the default audio endpoint " +
                          $"({percentage}%, muted={muted != 0}).");
+                // The write already happened above; hand the landed state to the
+                // audio owner so the taskbar slider matches the OSD immediately.
+                _audio.NoteExternalVolume(percentage, muted != 0);
                 VolumeFeedback.Play();
                 if (VolumeOsdVisibility.CanShow())
                 {
@@ -88,23 +92,13 @@ internal sealed class VolumeButtonService : IDisposable
             }
             else
             {
-                Log.Warn($"Volume button {VolumeAppCommands.Describe(command)} failed (HRESULT 0x{result:X8}).");
+                Log.Warn($"Volume button {command} failed (HRESULT 0x{result:X8}).");
             }
         }
-        catch (DllNotFoundException ex)
+        catch (Exception ex)
         {
-            DisableForMissingNativeHelper(ex);
+            Log.Error($"Volume button {command} failed unexpectedly.", ex);
         }
-        catch (EntryPointNotFoundException ex)
-        {
-            DisableForMissingNativeHelper(ex);
-        }
-    }
-
-    private void DisableForMissingNativeHelper(Exception ex)
-    {
-        _nativeHelperUnavailable = true;
-        Log.Error("Game-mode volume buttons disabled: WSGM.VolumeControl.dll is unavailable.", ex);
     }
 
     /// <summary>Unsubscribes and relinquishes shell-hook ownership.</summary>

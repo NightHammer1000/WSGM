@@ -1,24 +1,25 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace WSGM.Interop;
 
-/// <summary>Flat Win32 storage interop for the taskbar's Safe Eject feature:
+/// <summary>Flat Win32 storage interop shared by the eject, card and format flows:
 /// volume-to-disk mapping (IOCTL_STORAGE_GET_DEVICE_NUMBER), the hotplug
 /// classification that separates a USB device from a built-in card reader
 /// (IOCTL_STORAGE_GET_HOTPLUG_INFO), the PnP device eject
 /// (CM_Request_Device_EjectW) and the media-level dismount sequence
 /// (FSCTL_LOCK_VOLUME → FSCTL_DISMOUNT_VOLUME → IOCTL_STORAGE_EJECT_MEDIA).
 ///
-/// Everything here is cfgmgr32/kernel32 — no COM, no WMI — so it is legal under
-/// the NativeAOT publish. Devnode discovery goes through the cfgmgr32 interface
-/// list rather than SetupAPI's devinfo sets: same data, no variable-size
-/// detail-struct marshalling.
+/// Everything here is cfgmgr32/kernel32 — no COM and no WMI. Devnode discovery
+/// goes through the cfgmgr32 interface list rather than SetupAPI's devinfo sets:
+/// same data, no variable-size detail-struct marshalling.
 ///
 /// The two fixed-layout records are decoded from documented offsets by pure
-/// span readers, so the layouts are unit-testable from a synthetic buffer (the
-/// NativeRadio approach).</summary>
+/// span readers, so the layouts are unit-testable from a synthetic buffer without
+/// a live device.</summary>
 internal static unsafe partial class NativeStorage
 {
     // ---- return codes / constants ----
@@ -38,7 +39,7 @@ internal static unsafe partial class NativeStorage
     private const int InterfaceListAttempts = 3;
 
     /// <summary>CM_DEVCAP_REMOVABLE: the devnode itself can be ejected.</summary>
-    internal const uint DevCapRemovable = 0x4;
+    private const uint DevCapRemovable = 0x4;
 
     // CM_DRP_* registry properties (SPDRP value + 1).
     private const uint DrpDeviceDesc = 0x01;
@@ -280,6 +281,55 @@ internal static unsafe partial class NativeStorage
         return true;
     }
 
+    /// <summary>One mounted local volume, mapped back to its physical disk.</summary>
+    /// <param name="Letter">The upper-case drive letter.</param>
+    /// <param name="Disk">The physical disk number from the device-number query.</param>
+    /// <param name="DeviceType">The FILE_DEVICE_* type of the underlying device.</param>
+    /// <param name="Ready">Whether the media was ready when walked.</param>
+    /// <param name="DriveType">The .NET drive type (Fixed or Removable).</param>
+    /// <param name="SizeBytes">The volume size, 0 when the media is not ready.</param>
+    internal readonly record struct MountedVolume(
+        char Letter, int Disk, int DeviceType, bool Ready, DriveType DriveType, long SizeBytes);
+
+    /// <summary>The one mounted-volume walk behind every letter-to-disk lookup:
+    /// each local Fixed/Removable drive letter whose volume answered the
+    /// device-number query. No readiness or device-type filtering here — callers
+    /// keep their own (a letterless or not-ready card is meaningful to some of
+    /// them). A drive vanishing mid-walk is skipped, matching the per-drive
+    /// tolerance every previous copy of this loop had.</summary>
+    internal static List<MountedVolume> MountedVolumes()
+    {
+        var result = new List<MountedVolume>();
+        foreach (var drive in DriveInfo.GetDrives())
+        {
+            try
+            {
+                if (drive.DriveType is not (DriveType.Fixed or DriveType.Removable))
+                {
+                    continue;
+                }
+                var letter = char.ToUpperInvariant(drive.Name[0]);
+                using var volume = OpenVolumeForQuery(letter);
+                if (volume.IsInvalid
+                    || !TryGetDeviceNumber(volume, out var type, out var disk))
+                {
+                    continue;
+                }
+                var ready = drive.IsReady;
+                result.Add(new MountedVolume(
+                    letter, disk, type, ready, drive.DriveType, ready ? drive.TotalSize : 0));
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // A volume we may not even query is not one any caller can act on.
+            }
+        }
+        return result;
+    }
+
     /// <summary>Lists the device-interface paths of every present disk. The size
     /// query and the list call are a documented race — a disk arriving or leaving
     /// between them makes the list call report CR_BUFFER_SMALL — so the pair is
@@ -366,9 +416,7 @@ internal static unsafe partial class NativeStorage
     {
         // CM_Get_Device_IDW; capped at MAX_DEVICE_ID_LEN (200). Decode bounded:
         // `new string(char*)` scans for a NUL with no end, so an id that exactly
-        // fills the buffer would read past the stack allocation. The bounded read
-        // returns the byte-identical string whenever a NUL is present, so the row
-        // key, the eject log line and the format-target id are unchanged.
+        // fills the buffer would read past the stack allocation.
         var buffer = stackalloc char[200];
         return CM_Get_Device_IDW(devInst, buffer, 200, 0) == CrSuccess
             ? ReadBoundedString(buffer, 200)
@@ -414,7 +462,7 @@ internal static unsafe partial class NativeStorage
 
     /// <summary>Reads the devnode's CM_DEVCAP_* capability bits, 0 on failure.</summary>
     /// <param name="devInst">The devnode.</param>
-    internal static uint GetCapabilities(uint devInst)
+    private static uint GetCapabilities(uint devInst)
     {
         var length = 4u;
         uint capabilities = 0;
@@ -701,4 +749,48 @@ internal static unsafe partial class NativeStorage
 
     /// <summary>The calling thread's last Win32 error, for log lines.</summary>
     internal static int LastWin32Error() => Marshal.GetLastPInvokeError();
+
+    // ---- DOS-to-NT device path translation ----
+
+    [LibraryImport("kernel32.dll", EntryPoint = "QueryDosDeviceW", SetLastError = true,
+        StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint QueryDosDeviceW(string deviceName, char* targetPath, uint maxLength);
+
+    /// <summary>Converts a local DOS path to the NT device notation kernel
+    /// drivers (HidHide) consume. Returns the normalized input when Windows
+    /// cannot translate it, logging why.</summary>
+    /// <param name="path">The DOS path to translate.</param>
+    internal static string FromDosPath(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith(@"\Device\", StringComparison.OrdinalIgnoreCase))
+        {
+            return fullPath;
+        }
+
+        var root = Path.GetPathRoot(fullPath);
+        if (root is null || root.Length < 2 || root[1] != ':')
+        {
+            Core.Log.Warn(
+                $"NT device-path conversion skipped: application path is not on a local drive ({fullPath}).");
+            return fullPath;
+        }
+
+        // QueryDosDevice returns a MULTI_SZ; the first mapping is the active
+        // drive target, which is the one HidHide compares against.
+        var buffer = stackalloc char[1024];
+        var target = QueryDosDeviceW(root[..2], buffer, 1024) == 0
+            ? ""
+            : ReadBoundedString(buffer, 1024);
+        if (target.Length == 0)
+        {
+            Core.Log.Warn(
+                $"NT device-path conversion failed for {root[..2]} with Win32 error "
+                + $"{Marshal.GetLastPInvokeError()}; HidHide readability may be unavailable.");
+            return fullPath;
+        }
+
+        return target + fullPath[2..];
+    }
 }

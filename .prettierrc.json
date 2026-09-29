@@ -3,5 +3,13 @@
   "printWidth": 100,
   "proseWrap": "always",
   "tabWidth": 2,
-  "useTabs": false
+  "useTabs": false,
+  "overrides": [
+    {
+      "files": "src/WSGM/Core/SteamUiAssets/*.js",
+      "options": {
+        "endOfLine": "lf"
+      }
+    }
+  ]
 }
