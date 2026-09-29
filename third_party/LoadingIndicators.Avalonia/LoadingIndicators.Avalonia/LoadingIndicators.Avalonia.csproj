@@ -31,7 +31,7 @@
     <ItemGroup>
         <!-- Pinned to the exact Avalonia WSGM ships; a mismatch here is what the
              NuGet package's breakage was. -->
-        <PackageReference Include="Avalonia" Version="12.1.1" />
+        <PackageReference Include="Avalonia" Version="12.1.2" />
     </ItemGroup>
 
     <ItemGroup>

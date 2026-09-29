@@ -88,17 +88,17 @@
   <ItemGroup>
     <!-- Pinned exactly: a shell replacement must ship the patch level that was
          tested on device, and rebuilding a tag must reproduce the same binaries. -->
-    <PackageReference Include="Avalonia" Version="12.1.1" />
-    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+    <PackageReference Include="Avalonia" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.2" />
     <!-- FluentAvaloniaTheme (the runtime accent pipeline regenerates its shades via
          CustomAccentColor) plus WinUI-style controls such as FAInfoBar and ToggleSwitch.
          3.x is the first line built against Avalonia 12. -->
-    <PackageReference Include="FluentAvaloniaUI" Version="3.0.2" />
+    <PackageReference Include="FluentAvaloniaUI" Version="3.1.0" />
     <!-- Pinned: FluentAvaloniaUI's transitive ColorPicker can resolve below the
          Avalonia version above — the explicit pin removes the version skew. -->
-    <PackageReference Include="Avalonia.Controls.ColorPicker" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Controls.ColorPicker" Version="12.1.2" />
     <!-- Controller input. Plain-DllImport bindings (AOT-safe), bundles native SDL3.dll
          for win-x64 so build and publish output pick it up automatically. -->
     <PackageReference Include="ppy.SDL3-CS" Version="2026.722.0" />
